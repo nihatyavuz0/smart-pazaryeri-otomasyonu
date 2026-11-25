@@ -128,6 +128,7 @@ namespace SmartMarketplace
         public int VatRate { get; set; }
         public double Desi { get; set; }
         public List<string> Images { get; set; }
+        public VisionReport VisionData { get; set; }
         public CompetitorReport CompetitorData { get; set; }
         public Dictionary<string, MarketplaceListing> Listings { get; set; }
         public string CreatedAt { get; set; }
@@ -159,6 +160,7 @@ namespace SmartMarketplace
         public string RemoteId { get; set; }
         public string StatusMessage { get; set; }
         public string LastSyncAt { get; set; }
+        public ChannelResearch Research { get; set; }
         public List<AttributeItem> Attributes { get; set; }
 
         public MarketplaceListing()
@@ -166,6 +168,53 @@ namespace SmartMarketplace
             BulletPoints = new List<string>();
             Attributes = new List<AttributeItem>();
             Status = "draft";
+        }
+    }
+
+    public class VisionReport
+    {
+        public bool Analyzed { get; set; }
+        public string EngineUsed { get; set; } // "Google Gemini Vision", "OpenAI Vision", "Smart Görsel Piksel Analizi"
+        public string DetectedProductName { get; set; }
+        public string DetectedCategory { get; set; }
+        public string DominantColor { get; set; }
+        public string DominantColorHex { get; set; }
+        public string DetectedMaterial { get; set; }
+        public string SearchQuery { get; set; }
+        public string Confidence { get; set; }
+        public decimal EstimatedMinPrice { get; set; }
+        public decimal EstimatedMaxPrice { get; set; }
+        public List<string> VisualFeatures { get; set; }
+        public string Summary { get; set; }
+
+        public VisionReport()
+        {
+            VisualFeatures = new List<string>();
+        }
+    }
+
+    public class ChannelResearch
+    {
+        public string MarketplaceId { get; set; }
+        public string MarketplaceName { get; set; }
+        public string SearchQuery { get; set; }
+        public bool LiveDataFound { get; set; }
+        public decimal MinPrice { get; set; }
+        public decimal AvgPrice { get; set; }
+        public decimal MaxPrice { get; set; }
+        public decimal SuggestedPrice { get; set; }
+        public string MatchedCategoryId { get; set; }
+        public string MatchedCategoryName { get; set; }
+        public string CategorySource { get; set; }
+        public string IsolationStatus { get; set; }
+        public string Summary { get; set; }
+        public List<string> ChannelKeywords { get; set; }
+        public List<CompetitorSample> Samples { get; set; }
+
+        public ChannelResearch()
+        {
+            ChannelKeywords = new List<string>();
+            Samples = new List<CompetitorSample>();
         }
     }
 
@@ -233,6 +282,7 @@ namespace SmartMarketplace
     {
         public string Prompt { get; set; }
         public List<string> Images { get; set; }
+        public List<string> OriginalFileNames { get; set; }
         public List<string> TargetMarketplaces { get; set; }
         public decimal? Price { get; set; }
         public int? Stock { get; set; }

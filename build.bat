@@ -25,7 +25,9 @@ del /f /q "%TMPEXE%" >nul 2>&1
     "%~dp0backend\Storage.cs" ^
     "%~dp0backend\MarketplaceSchema.cs" ^
     "%~dp0backend\CompetitorAnalyzer.cs" ^
+    "%~dp0backend\VisionAnalyzer.cs" ^
     "%~dp0backend\TrendyolCategoryEngine.cs" ^
+    "%~dp0backend\MarketplaceResearchEngine.cs" ^
     "%~dp0backend\AiContentEngine.cs" ^
     "%~dp0backend\MarketplaceConnectors.cs" ^
     "%~dp0backend\Program.cs"

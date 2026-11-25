@@ -182,12 +182,15 @@
                 <div class="dropzone-sub">JPG, PNG, WEBP — Çoklu fotoğraf desteklenir</div>
               </div>
               <div class="thumb-list" id="uploaded-thumbs"></div>
+              <button type="button" class="btn btn-khaki-soft btn-sm btn-full hidden" id="btn-scan-vision" style="margin-top:10px;">
+                Görseli Tara & Ürünü Otomatik Algıla
+              </button>
             </div>
 
             <!-- Prompt Area -->
             <div>
-              <label class="field-label" for="product-prompt">Ürün Özellikleri (Prompt)</label>
-              <textarea id="product-prompt" class="textarea" rows="5" placeholder="Örnek: Kadın oversize %100 pamuklu haki sweatshirt, M beden, günlük kullanıma uygun yumuşak şardonlu kumaş, 649 TL, 40 adet stok..."></textarea>
+              <label class="field-label" for="product-prompt">Ürün Özellikleri (Prompt) <span class="opt">(görsel yüklediyseniz boş bırakabilirsiniz)</span></label>
+              <textarea id="product-prompt" class="textarea" rows="5" placeholder="Örnek: Kadın oversize %100 pamuklu haki sweatshirt, M beden, 649 TL, 40 adet stok — ya da sadece görsel yükleyip analiz butonuna basın, Smart ürünü ve fiyatını kendisi bulsun..."></textarea>
 
               <div class="prompt-examples">
                 <span class="muted-label">Hızlı örnek:</span>
@@ -247,11 +250,13 @@
           <div class="card card-tinted" id="competitor-card">
             <div class="card-head">
               <div>
-                <h2>Rakip Analizi & Eksik Alan Tamamlama</h2>
+                <h2>Görsel & Rakip Analizi</h2>
                 <p class="subtitle" id="comp-summary"></p>
               </div>
               <span class="badge badge-khaki" id="engine-badge">Smart Motoru</span>
             </div>
+
+            <div id="vision-summary-box" class="vision-box hidden"></div>
 
             <div class="comp-grid">
               <div class="comp-box">

@@ -267,7 +267,7 @@ namespace SmartMarketplace
                             WriteJson(stream, 200, new
                             {
                                 ok = true,
-                                appVersion = "v3.4",
+                                appVersion = "v3.5",
                                 serverId = _serverInstanceId,
                                 frontendVersion = ComputeFrontendVersion()
                             });
@@ -545,6 +545,30 @@ namespace SmartMarketplace
                     return;
                 }
 
+                if (path == "/api/vision/scan" && method == "POST")
+                {
+                    if (!Security.CheckRateLimit("analyze", 30))
+                    {
+                        WriteJson(stream, 429, new { ok = false, error = "Çok sık görsel tarama isteği. Lütfen birkaç saniye bekleyin." });
+                        return;
+                    }
+                    var scanReq = Storage.Deserialize<AnalyzeRequest>(req.Body);
+                    if (scanReq == null || scanReq.Images == null || scanReq.Images.Count == 0)
+                    {
+                        WriteJson(stream, 400, new { ok = false, error = "Lütfen önce en az bir ürün görseli yükleyin." });
+                        return;
+                    }
+                    scanReq.Images = scanReq.Images.Where(Security.IsSafeImageUrl).Take(6).ToList();
+                    var db = Storage.Load();
+                    var vision = VisionAnalyzer.AnalyzeProductImages(scanReq.Images, scanReq.OriginalFileNames, scanReq.Prompt, db.AiConfig);
+                    Storage.AddLog(db, "analysis", "info", "Smart Vision",
+                        "Görsel tarama tamamlandı: '" + vision.DetectedProductName + "' (" + vision.DominantColor + ").",
+                        "Motor: " + vision.EngineUsed);
+                    Storage.Save(db);
+                    WriteJson(stream, 200, new { ok = true, vision = vision });
+                    return;
+                }
+
                 if (path == "/api/analyze" && method == "POST")
                 {
                     if (!Security.CheckRateLimit("analyze", 30))
@@ -553,19 +577,21 @@ namespace SmartMarketplace
                         return;
                     }
                     var analyzeReq = Storage.Deserialize<AnalyzeRequest>(req.Body);
-                    if (analyzeReq == null || string.IsNullOrWhiteSpace(analyzeReq.Prompt))
+                    bool hasImages = analyzeReq != null && analyzeReq.Images != null && analyzeReq.Images.Count > 0;
+                    if (analyzeReq == null || (string.IsNullOrWhiteSpace(analyzeReq.Prompt) && !hasImages))
                     {
-                        WriteJson(stream, 400, new { ok = false, error = "Lütfen ürün hakkında en az birkaç kelime açıklama/prompt yazın." });
+                        WriteJson(stream, 400, new { ok = false, error = "Lütfen en az bir ürün görseli yükleyin veya ürün hakkında kısa bir açıklama yazın." });
                         return;
                     }
-                    if (analyzeReq.Prompt.Length > 4000) analyzeReq.Prompt = analyzeReq.Prompt.Substring(0, 4000);
+                    if (!string.IsNullOrEmpty(analyzeReq.Prompt) && analyzeReq.Prompt.Length > 4000)
+                        analyzeReq.Prompt = analyzeReq.Prompt.Substring(0, 4000);
                     analyzeReq.Images = (analyzeReq.Images ?? new List<string>()).Where(Security.IsSafeImageUrl).Take(12).ToList();
 
                     var db = Storage.Load();
                     string engineUsed;
                     var draft = AiContentEngine.GenerateSmartProduct(analyzeReq, db, out engineUsed);
 
-                    db.Draft.Prompt = analyzeReq.Prompt ?? "";
+                    db.Draft.Prompt = draft.Prompt ?? "";
                     db.Draft.UploadedImages = analyzeReq.Images;
                     db.Draft.SelectedTargetMps = analyzeReq.TargetMarketplaces ?? new List<string>();
                     db.Draft.GeneratedDraft = draft;
@@ -574,8 +600,8 @@ namespace SmartMarketplace
                     db.Draft.UpdatedAt = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss");
 
                     Storage.AddLog(db, "analysis", "info", "Smart AI",
-                        "'" + draft.BaseName + "' ürünü analiz edildi ve 7 pazaryeri için hazırlandı.",
-                        "Motor: " + engineUsed + " | Kategori: " + draft.Category + " | Eksik tamamlanan alan: " + draft.CompetitorData.MissingFieldsDetected.Count);
+                        "'" + draft.BaseName + "' görsel + her pazaryerine özel izole rakip araştırmasıyla hazırlandı.",
+                        "Motor: " + engineUsed + " | Kategori: " + draft.Category + " | Önerilen Fiyat: " + draft.Price.ToString("N0") + " TL");
                     Storage.Save(db);
                     WriteJson(stream, 200, new { ok = true, engineUsed = engineUsed, product = draft });
                     return;

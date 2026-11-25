@@ -1220,6 +1220,85 @@ body {
   color: var(--text-muted);
 }
 
+/* ---------- Vision & Per-Channel Isolated Research ---------- */
+.vision-box {
+  background: var(--bg-surface);
+  border: 1px solid #D4DCC6;
+  border-radius: var(--radius-md);
+  padding: 13px 16px;
+  margin-bottom: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.vision-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.vision-title {
+  font-size: 13.5px;
+  font-weight: 700;
+  color: var(--text-primary);
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.color-swatch {
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  border: 1px solid rgba(43, 48, 39, 0.25);
+  display: inline-block;
+  flex-shrink: 0;
+}
+
+.vision-meta {
+  font-size: 12.5px;
+  color: var(--text-secondary);
+}
+
+.channel-research-box {
+  background: var(--bg-tinted);
+  border: 1px solid #D4DCC6;
+  border-radius: var(--radius-md);
+  padding: 13px 15px;
+  margin-bottom: 16px;
+}
+
+.channel-research-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-bottom: 8px;
+}
+
+.channel-research-title {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--khaki-text);
+}
+
+.channel-research-grid {
+  display: grid;
+  grid-template-columns: 1fr 1.2fr;
+  gap: 12px;
+  margin-top: 8px;
+}
+
+@media (max-width: 820px) {
+  .channel-research-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
 /* ---------- API Cards ---------- */
 .ai-grid {
   display: grid;

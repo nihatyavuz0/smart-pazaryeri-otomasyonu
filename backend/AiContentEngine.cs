@@ -14,8 +14,101 @@ namespace SmartMarketplace
         {
             engineUsed = "Smart Yerleşik SEO Motoru";
 
-            var parsed = CompetitorAnalyzer.ParsePrompt(req);
-            var competitor = CompetitorAnalyzer.Analyze(parsed, db.AiConfig.EnableWebCompetitorAnalysis);
+            // 1. Scan uploaded product images first (Gemini Vision / OpenAI Vision / Smart Pixel Vision)
+            var vision = VisionAnalyzer.AnalyzeProductImages(req.Images, req.OriginalFileNames, req.Prompt, db.AiConfig);
+
+            // If user provided only images (empty/minimal prompt), hydrate prompt from Vision detection
+            string effectivePrompt = (req.Prompt ?? "").Trim();
+            if (vision != null && vision.Analyzed && string.IsNullOrWhiteSpace(effectivePrompt))
+            {
+                effectivePrompt = vision.DetectedProductName
+                    + (!string.IsNullOrWhiteSpace(vision.DominantColor) ? (", " + vision.DominantColor) : "")
+                    + (!string.IsNullOrWhiteSpace(vision.DetectedMaterial) ? (", " + vision.DetectedMaterial) : "");
+            }
+
+            var effectiveReq = new AnalyzeRequest
+            {
+                Prompt = effectivePrompt,
+                Images = req.Images,
+                OriginalFileNames = req.OriginalFileNames,
+                TargetMarketplaces = req.TargetMarketplaces,
+                Price = req.Price,
+                Stock = req.Stock,
+                Brand = req.Brand,
+                Barcode = req.Barcode,
+                Sku = req.Sku
+            };
+
+            var parsed = CompetitorAnalyzer.ParsePrompt(effectiveReq);
+
+            // Enrich any missing fields from Vision scan BEFORE marketplace research
+            if (vision != null && vision.Analyzed)
+            {
+                if (!string.IsNullOrWhiteSpace(vision.DetectedProductName) && (string.IsNullOrWhiteSpace(req.Prompt) || parsed.CleanTitle == "Yeni Ürün"))
+                    parsed.CleanTitle = vision.DetectedProductName;
+                if (!string.IsNullOrWhiteSpace(vision.DetectedCategory) && (parsed.Category == "Genel / Çok Amaçlı" || string.IsNullOrWhiteSpace(req.Prompt)))
+                    parsed.Category = vision.DetectedCategory;
+                if (string.IsNullOrWhiteSpace(parsed.Color) && !string.IsNullOrWhiteSpace(vision.DominantColor) && vision.DominantColor != "Standart")
+                    parsed.Color = vision.DominantColor;
+                if (string.IsNullOrWhiteSpace(parsed.Material) && !string.IsNullOrWhiteSpace(vision.DetectedMaterial))
+                    parsed.Material = vision.DetectedMaterial;
+                if (vision.VisualFeatures != null)
+                {
+                    foreach (var vf in vision.VisualFeatures)
+                        if (!parsed.ExtractedFeatures.Contains(vf)) parsed.ExtractedFeatures.Add(vf);
+                }
+            }
+
+            var targets = (req.TargetMarketplaces != null && req.TargetMarketplaces.Count > 0)
+                ? req.TargetMarketplaces
+                : db.Marketplaces.Where(m => m.Enabled).Select(m => m.Id).ToList();
+
+            string researchQuery = (vision != null && vision.Analyzed && !string.IsNullOrWhiteSpace(vision.SearchQuery))
+                ? vision.SearchQuery
+                : parsed.CleanTitle;
+
+            // 2. Run PARALLEL, COMPLETELY ISOLATED per-marketplace competitor, price, and category research!
+            var channelResearchMap = MarketplaceResearchEngine.ResearchAllInParallel(
+                db.Marketplaces, targets, researchQuery, parsed, vision, db.AiConfig.EnableWebCompetitorAnalysis);
+
+            // Derive aggregate competitor report & discovered price if user didn't provide one
+            var competitor = CompetitorAnalyzer.Analyze(parsed, false);
+            var activeResearchList = targets.Where(id => channelResearchMap.ContainsKey(id)).Select(id => channelResearchMap[id]).ToList();
+            if (activeResearchList.Count > 0)
+            {
+                var liveChannels = activeResearchList.Where(r => r.LiveDataFound).ToList();
+                var pricePool = (liveChannels.Count > 0 ? liveChannels : activeResearchList).Where(r => r.AvgPrice > 0).ToList();
+                if (pricePool.Count > 0)
+                {
+                    var sortedSuggested = pricePool.Select(x => x.SuggestedPrice).OrderBy(x => x).ToList();
+                    decimal medianSuggested = sortedSuggested[sortedSuggested.Count / 2];
+                    var sortedAvg = pricePool.Select(x => x.AvgPrice).OrderBy(x => x).ToList();
+                    decimal medianAvg = sortedAvg[sortedAvg.Count / 2];
+
+                    competitor.WebSearchUsed = liveChannels.Count > 0;
+                    competitor.MinPrice = Math.Round(pricePool.Min(x => x.MinPrice), 0);
+                    competitor.MaxPrice = Math.Round(pricePool.Max(x => x.MaxPrice), 0);
+                    competitor.AvgPrice = Math.Round(medianAvg, 0);
+                    if (!req.Price.HasValue && (parsed.Price <= 0 || competitor.MissingFieldsDetected.Contains("Satış Fiyatı")))
+                    {
+                        parsed.Price = Math.Round(medianSuggested, 0);
+                    }
+                }
+                competitor.Samples.Clear();
+                foreach (var cr in activeResearchList)
+                {
+                    foreach (var s in cr.Samples.Take(1))
+                        competitor.Samples.Add(s);
+                }
+                competitor.Summary = string.Format(
+                    "{0} pazaryeri birbirinden tamamen izole olarak araştırıldı ({1} canlı kanal verisi). Pazar fiyat aralığı: {2} – {3} TL (Ortalama: {4} TL). Her pazaryerinin kendi kategori ve zorunlu özellik şeması ayrı eşleştirildi.",
+                    activeResearchList.Count,
+                    liveChannels.Count,
+                    competitor.MinPrice.ToString("N0", new CultureInfo("tr-TR")),
+                    competitor.MaxPrice.ToString("N0", new CultureInfo("tr-TR")),
+                    competitor.AvgPrice.ToString("N0", new CultureInfo("tr-TR"))
+                );
+            }
 
             string sku = string.IsNullOrWhiteSpace(req.Sku)
                 ? "SMR-" + DateTime.Now.ToString("yyMMdd") + "-" + Guid.NewGuid().ToString("N").Substring(0, 4).ToUpperInvariant()
@@ -25,25 +118,22 @@ namespace SmartMarketplace
                 ? GenerateEan13()
                 : req.Barcode.Trim();
 
-            var targets = (req.TargetMarketplaces != null && req.TargetMarketplaces.Count > 0)
-                ? req.TargetMarketplaces
-                : db.Marketplaces.Where(m => m.Enabled).Select(m => m.Id).ToList();
-
             var product = new ProductRecord
             {
                 Id = "prd_" + Guid.NewGuid().ToString("N").Substring(0, 10),
                 Sku = sku,
                 Barcode = barcode,
                 BaseName = parsed.CleanTitle,
-                Brand = parsed.Brand,
+                Brand = ComplianceGuard.CleanBrandName(parsed.Brand),
                 Category = parsed.Category,
-                Prompt = req.Prompt ?? "",
+                Prompt = effectivePrompt,
                 Price = parsed.Price,
                 ListPrice = Math.Round(parsed.Price * 1.18m, 0),
                 Stock = parsed.Stock,
                 VatRate = parsed.VatRate,
                 Desi = parsed.Desi,
                 Images = req.Images ?? new List<string>(),
+                VisionData = vision,
                 CompetitorData = competitor,
                 CreatedAt = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"),
                 UpdatedAt = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss")
@@ -55,43 +145,107 @@ namespace SmartMarketplace
             {
                 if ((db.AiConfig.Provider == "gemini" || db.AiConfig.Provider == "auto") && !string.IsNullOrWhiteSpace(db.AiConfig.GeminiApiKey))
                 {
-                    llmResult = TryCallGemini(req, parsed, competitor, targets, db.AiConfig);
+                    llmResult = TryCallGemini(effectiveReq, parsed, competitor, targets, db.AiConfig);
                     if (llmResult != null) engineUsed = "Google Gemini (" + db.AiConfig.GeminiModel + ")";
                 }
                 if (llmResult == null && (db.AiConfig.Provider == "openai" || db.AiConfig.Provider == "auto") && !string.IsNullOrWhiteSpace(db.AiConfig.OpenAiApiKey))
                 {
-                    llmResult = TryCallOpenAi(req, parsed, competitor, targets, db.AiConfig);
+                    llmResult = TryCallOpenAi(effectiveReq, parsed, competitor, targets, db.AiConfig);
                     if (llmResult != null) engineUsed = "OpenAI (" + db.AiConfig.OpenAiModel + ")";
                 }
             }
+            if (vision != null && vision.Analyzed && !engineUsed.Contains("Vision"))
+                engineUsed = engineUsed + " + " + vision.EngineUsed;
 
+            // 3. Build each marketplace listing in complete isolation using ONLY that marketplace's own research, pricing, category, and attribute schema!
             foreach (var mp in db.Marketplaces)
             {
-                bool isSelected = targets.Contains(mp.Id);
-                var listing = BuildMarketplaceListing(mp.Id, parsed, competitor, product, isSelected, llmResult, db.AiConfig.Tone);
-
-                // For Trendyol in Live Mode, immediately resolve REAL internal Trendyol leaf category + live mandatory attributes!
-                if (mp.Id == "trendyol" && !mp.SimulationMode && MarketplaceConnectors.HasRequiredCredentials(mp))
+                try
                 {
-                    try
+                    bool isSelected = targets.Contains(mp.Id);
+                    ChannelResearch chRes = channelResearchMap.ContainsKey(mp.Id) ? channelResearchMap[mp.Id] : null;
+
+                    // Create a channel-specific CompetitorReport view so this marketplace's keywords/samples don't leak from another marketplace
+                    var chComp = new CompetitorReport
                     {
-                        var tyMatch = TrendyolCategoryEngine.ResolveBestCategory(mp, product.BaseName, listing.Title, product.Prompt, product.Category, 0);
-                        if (tyMatch.Success && tyMatch.CategoryId > 0)
+                        DetectedCategory = chRes != null && !string.IsNullOrWhiteSpace(chRes.MatchedCategoryName) ? chRes.MatchedCategoryName : parsed.Category,
+                        TrendingKeywords = (chRes != null && chRes.ChannelKeywords.Count > 0) ? new List<string>(chRes.ChannelKeywords) : new List<string>(competitor.TrendingKeywords),
+                        MissingFieldsDetected = new List<string>(competitor.MissingFieldsDetected)
+                    };
+
+                    var listing = BuildMarketplaceListing(mp.Id, parsed, chComp, product, isSelected, llmResult, db.AiConfig.Tone);
+                    listing.Research = chRes;
+
+                    // Apply channel-specific price (if user didn't lock a fixed price) and channel-specific category
+                    if (chRes != null)
+                    {
+                        if (!req.Price.HasValue && chRes.SuggestedPrice > 0)
+                            listing.Price = chRes.SuggestedPrice;
+                        if (!string.IsNullOrWhiteSpace(chRes.MatchedCategoryId))
+                            listing.CategoryId = chRes.MatchedCategoryId;
+                        if (!string.IsNullOrWhiteSpace(chRes.MatchedCategoryName))
+                            listing.CategoryName = chRes.MatchedCategoryName;
+                    }
+
+                    // Namespace non-Trendyol attribute keys per marketplace so attributes NEVER collide across channels
+                    if (mp.Id != "trendyol")
+                    {
+                        foreach (var attr in listing.Attributes)
                         {
-                            listing.CategoryId = tyMatch.CategoryId.ToString();
-                            listing.CategoryName = tyMatch.FullPath;
-                            listing.StatusMessage = "Trendyol iç kategorisi eşleştirildi: " + tyMatch.CategoryName + " (" + tyMatch.Source + ")";
-                            var liveAttrs = TrendyolCategoryEngine.BuildUiAttributesForCategory(mp, tyMatch.CategoryId, product.BaseName, listing.Title, product.Prompt, listing.Attributes);
-                            if (liveAttrs.Count > 0)
-                            {
-                                listing.Attributes = liveAttrs;
-                            }
+                            if (!attr.Key.StartsWith(mp.Id + "_"))
+                                attr.Key = mp.Id + "_" + attr.Key;
                         }
                     }
-                    catch { }
-                }
 
-                product.Listings[mp.Id] = listing;
+                    // For Trendyol in Live Mode, resolve REAL Trendyol internal leaf category + V2 mandatory attributes
+                    if (mp.Id == "trendyol" && !mp.SimulationMode && MarketplaceConnectors.HasRequiredCredentials(mp))
+                    {
+                        try
+                        {
+                            int prefId = 0;
+                            if (chRes != null) int.TryParse(chRes.MatchedCategoryId, out prefId);
+                            var tyMatch = TrendyolCategoryEngine.ResolveBestCategory(mp, product.BaseName, listing.Title, product.Prompt, product.Category, prefId);
+                            if (tyMatch.Success && tyMatch.CategoryId > 0)
+                            {
+                                listing.CategoryId = tyMatch.CategoryId.ToString();
+                                listing.CategoryName = tyMatch.FullPath;
+                                if (listing.Research != null)
+                                {
+                                    listing.Research.MatchedCategoryId = listing.CategoryId;
+                                    listing.Research.MatchedCategoryName = tyMatch.FullPath;
+                                    listing.Research.CategorySource = tyMatch.Source;
+                                }
+                                listing.StatusMessage = "Trendyol iç kategorisi eşleştirildi: " + tyMatch.CategoryName + " (" + tyMatch.Source + ")";
+                                var liveAttrs = TrendyolCategoryEngine.BuildUiAttributesForCategory(mp, tyMatch.CategoryId, product.BaseName, listing.Title, product.Prompt, listing.Attributes);
+                                if (liveAttrs.Count > 0) listing.Attributes = liveAttrs;
+                            }
+                        }
+                        catch { }
+                    }
+
+                    // Final per-marketplace compliance scrub
+                    var compClean = ComplianceGuard.SanitizeListing(listing.Title, listing.Description, listing.MaxTitleLength, product.Brand);
+                    if (!string.IsNullOrWhiteSpace(compClean.CleanedTitle)) listing.Title = compClean.CleanedTitle;
+                    if (!string.IsNullOrWhiteSpace(compClean.CleanedDescription)) listing.Description = compClean.CleanedDescription;
+
+                    product.Listings[mp.Id] = listing;
+                }
+                catch (Exception ex)
+                {
+                    // Fault isolation: one marketplace failing can NEVER crash the other 6 marketplaces!
+                    product.Listings[mp.Id] = new MarketplaceListing
+                    {
+                        MarketplaceId = mp.Id,
+                        MarketplaceName = mp.Name,
+                        Selected = false,
+                        Title = product.BaseName,
+                        MaxTitleLength = MarketplaceSchema.GetMaxTitleLength(mp.Id),
+                        Price = product.Price,
+                        SyncedStock = product.Stock,
+                        Status = "error",
+                        StatusMessage = mp.Name + " izole hazırlama uyarısı: " + ex.Message
+                    };
+                }
             }
 
             return product;

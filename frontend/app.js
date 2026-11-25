@@ -15,6 +15,7 @@ const state = {
   products: [],
   logs: [],
   uploadedImages: [],
+  uploadedFileNames: [],
   selectedTargetMps: [],
   currentDraft: null,
   engineUsed: '',
@@ -513,6 +514,48 @@ function bindAddProductEvents() {
   document.getElementById('btn-autopilot').addEventListener('click', () => runAnalysis(true));
   document.getElementById('btn-publish-draft').addEventListener('click', publishCurrentDraft);
   document.getElementById('btn-clear-draft').addEventListener('click', clearDraftExplicitly);
+
+  const scanBtn = document.getElementById('btn-scan-vision');
+  if (scanBtn) scanBtn.addEventListener('click', scanUploadedImagesWithVision);
+}
+
+async function scanUploadedImagesWithVision() {
+  if (state.uploadedImages.length === 0) {
+    toast('Lütfen önce en az bir ürün görseli yükleyin.', 'error');
+    return;
+  }
+  const btn = document.getElementById('btn-scan-vision');
+  const orig = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = 'Görseller taranıyor...';
+  try {
+    const res = await apiFetch('/api/vision/scan', {
+      method: 'POST',
+      body: JSON.stringify({
+        Images: state.uploadedImages,
+        OriginalFileNames: state.uploadedFileNames,
+        Prompt: document.getElementById('product-prompt').value.trim()
+      })
+    });
+    const v = res.vision;
+    if (v && v.Analyzed) {
+      const promptEl = document.getElementById('product-prompt');
+      if (!promptEl.value.trim() && v.DetectedProductName) {
+        const parts = [v.DetectedProductName];
+        if (v.DominantColor && v.DominantColor !== 'Standart') parts.push(v.DominantColor);
+        if (v.DetectedMaterial) parts.push(v.DetectedMaterial);
+        if (Array.isArray(v.VisualFeatures) && v.VisualFeatures.length > 0) parts.push(v.VisualFeatures[0]);
+        promptEl.value = parts.join(', ');
+        scheduleDraftSave(true);
+      }
+      toast(`Görsel tarandı (${v.EngineUsed}): ${v.DetectedProductName} • Renk: ${v.DominantColor}`, 'success');
+    }
+  } catch (err) {
+    toast('Görsel tarama hatası: ' + err.message, 'error');
+  } finally {
+    btn.disabled = false;
+    btn.textContent = orig;
+  }
 }
 
 async function clearDraftExplicitly() {
@@ -554,6 +597,7 @@ async function handleImageFiles(files) {
         body: JSON.stringify({ fileName: file.name, data: base64 })
       });
       state.uploadedImages.push(resp.url);
+      state.uploadedFileNames.push(file.name);
     } catch (err) {
       toast('Görsel yüklenemedi: ' + err.message, 'error');
     }
@@ -579,11 +623,14 @@ function renderUploadedThumbs() {
       <button type="button" class="thumb-remove" data-action="remove-image" data-idx="${idx}" title="Kaldır">×</button>
     </div>
   `).join('');
+  const scanBtn = document.getElementById('btn-scan-vision');
+  if (scanBtn) scanBtn.classList.toggle('hidden', state.uploadedImages.length === 0);
 }
 
 function removeUploadedImage(idx) {
   if (isNaN(idx)) return;
   state.uploadedImages.splice(idx, 1);
+  if (state.uploadedFileNames.length > idx) state.uploadedFileNames.splice(idx, 1);
   renderUploadedThumbs();
   scheduleDraftSave(true);
 }
@@ -611,8 +658,8 @@ function toggleTargetMp(id) {
 
 async function runAnalysis(autoPublish) {
   const prompt = document.getElementById('product-prompt').value.trim();
-  if (!prompt) {
-    toast('Lütfen ürün hakkında en az birkaç özellik yazın.', 'error');
+  if (!prompt && state.uploadedImages.length === 0) {
+    toast('Lütfen en az bir ürün görseli yükleyin veya ürün hakkında kısa bir açıklama yazın.', 'error');
     return;
   }
   if (state.selectedTargetMps.length === 0) {
@@ -625,7 +672,7 @@ async function runAnalysis(autoPublish) {
   const btnAuto = document.getElementById('btn-autopilot');
   btnAnalyze.disabled = true;
   btnAuto.disabled = true;
-  statusEl.textContent = 'Rakip analizi yapılıyor ve tüm pazaryerleri için SEO içerikleri hazırlanıyor...';
+  statusEl.textContent = 'Görseller taranıyor ve her pazaryeri için ayrı izole rakip & fiyat araştırması yapılıyor...';
 
   const priceVal = parseFloat(document.getElementById('opt-price').value);
   const stockVal = parseInt(document.getElementById('opt-stock').value, 10);
@@ -634,6 +681,7 @@ async function runAnalysis(autoPublish) {
     const payload = {
       Prompt: prompt,
       Images: state.uploadedImages,
+      OriginalFileNames: state.uploadedFileNames,
       TargetMarketplaces: state.selectedTargetMps,
       Price: isNaN(priceVal) ? null : priceVal,
       Stock: isNaN(stockVal) ? null : stockVal,
@@ -676,6 +724,26 @@ function renderGeneratedPreview(engineUsed) {
 
   const p = state.currentDraft;
   const c = p.CompetitorData || {};
+  const v = p.VisionData || null;
+
+  const visionEl = document.getElementById('vision-summary-box');
+  if (visionEl) {
+    if (v && v.Analyzed) {
+      const swatch = v.DominantColorHex ? `<span class="color-swatch" style="background:${escAttr(v.DominantColorHex)}"></span>` : '';
+      const vFeats = (v.VisualFeatures || []).map(f => `<span class="kw-tag">${esc(f)}</span>`).join('');
+      visionEl.innerHTML = `
+        <div class="vision-head">
+          <div class="vision-title">${swatch} Görsel Tarama: ${esc(v.DetectedProductName || p.BaseName)}</div>
+          <span class="badge badge-info">${esc(v.EngineUsed || 'Smart Vision')}</span>
+        </div>
+        <div class="vision-meta">${esc(v.Summary || '')}</div>
+        ${vFeats ? `<div class="keyword-list">${vFeats}</div>` : ''}
+      `;
+      visionEl.classList.remove('hidden');
+    } else {
+      visionEl.classList.add('hidden');
+    }
+  }
 
   document.getElementById('engine-badge').textContent = engineUsed || 'Smart SEO Motoru';
   document.getElementById('comp-summary').textContent = c.Summary || '';
@@ -760,6 +828,31 @@ function renderActiveListingEditor() {
     </div>
   ` : '';
 
+  const chRes = l.Research || null;
+  const chResearchHtml = chRes ? `
+    <div class="channel-research-box">
+      <div class="channel-research-top">
+        <div class="channel-research-title">${esc(l.MarketplaceName)} Kanalına Özel İzole Araştırma</div>
+        <div style="display:flex; gap:6px; flex-wrap:wrap;">
+          <span class="badge ${chRes.LiveDataFound ? 'badge-success' : 'badge-khaki'}">${chRes.LiveDataFound ? 'Canlı Kanal Verisi' : 'Kanal Zekâsı'}</span>
+          <span class="badge badge-neutral">Çakışmasız İzole Şema</span>
+        </div>
+      </div>
+      <div class="vision-meta">${esc(chRes.Summary || '')}</div>
+      <div class="channel-research-grid">
+        <div>
+          <div class="comp-box-title" style="margin-bottom:5px;">Kanal Fiyat Bandı & Anahtar Kelimeler</div>
+          <div class="price-band" style="margin-top:0;">${fmtMoney(chRes.MinPrice)} – ${fmtMoney(chRes.MaxPrice)} • Önerilen: ${fmtMoney(chRes.SuggestedPrice)}</div>
+          <div class="keyword-list">${(chRes.ChannelKeywords || []).map(k => `<span class="kw-tag">${esc(k)}</span>`).join('')}</div>
+        </div>
+        <div>
+          <div class="comp-box-title" style="margin-bottom:5px;">${esc(l.MarketplaceName)} Rakip Örnekleri</div>
+          <ul class="clean-list">${(chRes.Samples || []).slice(0, 3).map(s => `<li>${esc(s.Title)} <span class="muted-label">(${esc(s.PriceHint)})</span></li>`).join('')}</ul>
+        </div>
+      </div>
+    </div>
+  ` : '';
+
   el.innerHTML = `
     <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:14px;">
       <label class="switch-label">
@@ -768,6 +861,7 @@ function renderActiveListingEditor() {
       </label>
       <span class="badge badge-neutral">Kategori ID: ${esc(l.CategoryId)} • Barkod: ${esc(p.Barcode)}</span>
     </div>
+    ${chResearchHtml}
     ${tyCatBoxHtml}
 
     <div class="editor-grid">
