@@ -20,8 +20,12 @@ document.addEventListener('DOMContentLoaded', () => {
     errEl.classList.add('hidden');
   }
 
+  function extractSixDigits(val) {
+    return String(val || '').replace(/\D+/g, '').slice(0, 6);
+  }
+
   async function submitPin() {
-    const pin = (input.value || '').replace(/\D+/g, '').slice(0, 6);
+    const pin = extractSixDigits(input.value);
     input.value = pin;
     clearError();
 
@@ -36,30 +40,55 @@ document.addEventListener('DOMContentLoaded', () => {
     try {
       const res = await fetch('/api/auth/pin', {
         method: 'POST',
+        credentials: 'same-origin',
+        cache: 'no-store',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ pin })
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok || data.ok === false) {
-        showError(data.error || 'PIN doğrulanamadı. Lütfen tekrar deneyin.');
+        showError(data.error || ('PIN doğrulanamadı (HTTP ' + res.status + '). Lütfen tekrar deneyin.'));
         input.select();
         input.focus();
         btn.disabled = false;
         btn.textContent = 'Panele Giriş Yap';
         return;
       }
-      btn.textContent = 'Giriş Başarılı...';
-      window.location.replace('/');
+
+      // Verify browser actually accepted the HttpOnly session cookie before redirecting
+      btn.textContent = 'Oturum Açılıyor...';
+      try {
+        const chk = await fetch('/api/version?t=' + Date.now(), {
+          credentials: 'same-origin',
+          cache: 'no-store'
+        });
+        if (chk.status === 401) {
+          showError('Bu tarayıcı oturum çerezini engelliyor (uygulama içi tarayıcı olabilir). Lütfen bu adresi doğrudan Chrome veya Safari ile açın.');
+          btn.disabled = false;
+          btn.textContent = 'Panele Giriş Yap';
+          return;
+        }
+      } catch { }
+
+      window.location.replace('/?ok=' + Date.now());
     } catch {
-      showError('Sunucuya ulaşılamadı. Bilgisayarınızda Smart\'ın açık olduğundan emin olun.');
+      showError('Sunucuya ulaşılamadı. Bilgisayarınızda Smart\'ın açık ve bağlantının aktif olduğundan emin olun.');
       btn.disabled = false;
       btn.textContent = 'Panele Giriş Yap';
     }
   }
 
   input.addEventListener('input', () => {
-    const cleaned = (input.value || '').replace(/\D+/g, '').slice(0, 6);
+    const cleaned = extractSixDigits(input.value);
     if (input.value !== cleaned) input.value = cleaned;
+    clearError();
+  });
+
+  input.addEventListener('paste', e => {
+    const pasted = (e.clipboardData || window.clipboardData)?.getData('text') || '';
+    if (!pasted) return;
+    e.preventDefault();
+    input.value = extractSixDigits(pasted);
     clearError();
   });
 

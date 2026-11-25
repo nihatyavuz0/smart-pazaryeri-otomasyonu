@@ -20,16 +20,16 @@
       </div>
       <div class="pin-eyebrow">Smart Uzaktan Erişim</div>
       <h1 class="pin-title">Güvenlik PIN Kodu</h1>
-      <p class="pin-subtitle">Bilgisayarınızdaki <strong>Smart &rarr; Mobil / Her Yerden Erişim</strong> penceresinde görünen 6 haneli PIN kodunu girin.</p>
+      <p class="pin-subtitle">Bilgisayarınızdaki <strong>Smart &rarr; Mobil</strong> penceresinde görünen 6 haneli PIN kodunu girin.</p>
 
-      <form id="pin-form" class="pin-form" autocomplete="off">
+      <form id="pin-form" class="pin-form" method="post" action="/api/auth/pin" autocomplete="off">
         <input
-          type="text"
+          type="tel"
+          name="pin"
           id="pin-input"
           class="pin-input"
           inputmode="numeric"
-          pattern="[0-9]*"
-          maxlength="6"
+          maxlength="16"
           autocomplete="one-time-code"
           placeholder="000000"
           aria-label="6 haneli güvenlik PIN kodu"

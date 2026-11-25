@@ -2318,6 +2318,10 @@ body {
   gap: 8px;
 }
 
+.remote-btn-row .btn {
+  white-space: nowrap;
+}
+
 .remote-hint {
   font-size: 12px;
   color: var(--text-muted);

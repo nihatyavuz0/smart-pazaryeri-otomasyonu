@@ -220,8 +220,8 @@ namespace SmartMarketplace
                         return;
                     }
 
-                    client.ReceiveTimeout = 15000;
-                    client.SendTimeout = 15000;
+                    client.ReceiveTimeout = 30000;
+                    client.SendTimeout = 30000;
                     using (var stream = client.GetStream())
                     {
                         var req = ParseHttpRequest(stream);
@@ -237,6 +237,7 @@ namespace SmartMarketplace
                         string host = req.Headers.ContainsKey("Host") ? req.Headers["Host"] : "";
                         if (!Security.IsValidHostHeader(host, _port))
                         {
+                            Console.WriteLine("[Smart] Engellenen Host: " + host + " (Aktif Tünel: " + Security.ActiveTunnelHost + ")");
                             WriteJson(stream, 403, new { ok = false, error = "Geçersiz Host başlığı engellendi." });
                             return;
                         }
@@ -244,6 +245,9 @@ namespace SmartMarketplace
                         // 2. Cross-Site Origin Guard
                         if (!Security.IsValidOriginHeader(req.Headers, _port, req.Method))
                         {
+                            string org = req.Headers.ContainsKey("Origin") ? req.Headers["Origin"] : "";
+                            string sfs = req.Headers.ContainsKey("Sec-Fetch-Site") ? req.Headers["Sec-Fetch-Site"] : "";
+                            Console.WriteLine("[Smart] Engellenen Origin/Site: Origin=" + org + " Sec-Fetch-Site=" + sfs + " Method=" + req.Method);
                             WriteJson(stream, 403, new { ok = false, error = "Çapraz kaynak (Cross-Origin) isteği güvenlik nedeniyle engellendi." });
                             return;
                         }
@@ -308,7 +312,7 @@ namespace SmartMarketplace
                             WriteJson(stream, 200, new
                             {
                                 ok = true,
-                                appVersion = "v3.6",
+                                appVersion = "v3.7",
                                 serverId = _serverInstanceId,
                                 frontendVersion = ComputeFrontendVersion(),
                                 dataVersion = Storage.GetDataVersion(),
@@ -494,46 +498,148 @@ namespace SmartMarketplace
                 {
                     string k = lines[i].Substring(0, colon).Trim();
                     string v = lines[i].Substring(colon + 1).Trim();
-                    req.Headers[k] = v;
+                    if (req.Headers.ContainsKey(k) && k.Equals("Cookie", StringComparison.OrdinalIgnoreCase))
+                        req.Headers[k] = req.Headers[k] + "; " + v;
+                    else
+                        req.Headers[k] = v;
                 }
             }
 
-            int contentLength = 0;
-            if (req.Headers.ContainsKey("Content-Length"))
+            // Honor Expect: 100-continue so Cloudflare / Go reverse proxy never stalls on mobile uploads
+            if (req.Headers.ContainsKey("Expect") && req.Headers["Expect"].IndexOf("100-continue", StringComparison.OrdinalIgnoreCase) >= 0)
             {
-                if (!int.TryParse(req.Headers["Content-Length"], out contentLength) || contentLength < 0)
-                    return null;
+                try
+                {
+                    byte[] cont = Encoding.ASCII.GetBytes("HTTP/1.1 100 Continue\r\n\r\n");
+                    stream.Write(cont, 0, cont.Length);
+                    stream.Flush();
+                }
+                catch { }
             }
 
             int maxAllowed = MaxDefaultBodyBytes;
             if (decodedPath.StartsWith("/api/upload", StringComparison.OrdinalIgnoreCase)) maxAllowed = MaxUploadBodyBytes;
             else if (decodedPath.StartsWith("/api/backup/import", StringComparison.OrdinalIgnoreCase)) maxAllowed = MaxBackupBodyBytes;
 
-            if (contentLength > maxAllowed)
-            {
-                req.PayloadTooLarge = true;
-                return req;
-            }
+            int bodyStart = headerEnd + 4;
+            int alreadyRead = allInitial.Length - bodyStart;
 
-            if (contentLength > 0)
-            {
-                int bodyStart = headerEnd + 4;
-                int alreadyRead = allInitial.Length - bodyStart;
-                var bodyMs = new MemoryStream(Math.Min(contentLength, 65536));
-                if (alreadyRead > 0)
-                    bodyMs.Write(allInitial, bodyStart, Math.Min(alreadyRead, contentLength));
+            bool isChunked = req.Headers.ContainsKey("Transfer-Encoding")
+                && req.Headers["Transfer-Encoding"].IndexOf("chunked", StringComparison.OrdinalIgnoreCase) >= 0;
 
-                while (bodyMs.Length < contentLength)
+            if (isChunked)
+            {
+                bool tooLarge;
+                req.Body = ReadChunkedBody(stream, allInitial, bodyStart, alreadyRead, maxAllowed, out tooLarge);
+                if (tooLarge)
                 {
-                    int toRead = (int)Math.Min(buf.Length, contentLength - bodyMs.Length);
-                    int r = stream.Read(buf, 0, toRead);
-                    if (r <= 0) break;
-                    bodyMs.Write(buf, 0, r);
+                    req.PayloadTooLarge = true;
+                    return req;
                 }
-                req.Body = Encoding.UTF8.GetString(bodyMs.ToArray());
+            }
+            else
+            {
+                int contentLength = 0;
+                if (req.Headers.ContainsKey("Content-Length"))
+                {
+                    if (!int.TryParse(req.Headers["Content-Length"], out contentLength) || contentLength < 0)
+                        return null;
+                }
+
+                if (contentLength > maxAllowed)
+                {
+                    req.PayloadTooLarge = true;
+                    return req;
+                }
+
+                if (contentLength > 0)
+                {
+                    var bodyMs = new MemoryStream(Math.Min(contentLength, 65536));
+                    if (alreadyRead > 0)
+                        bodyMs.Write(allInitial, bodyStart, Math.Min(alreadyRead, contentLength));
+
+                    while (bodyMs.Length < contentLength)
+                    {
+                        int toRead = (int)Math.Min(buf.Length, contentLength - bodyMs.Length);
+                        int r = stream.Read(buf, 0, toRead);
+                        if (r <= 0) break;
+                        bodyMs.Write(buf, 0, r);
+                    }
+                    req.Body = Encoding.UTF8.GetString(bodyMs.ToArray());
+                }
             }
 
             return req;
+        }
+
+        private static string ReadChunkedBody(NetworkStream stream, byte[] initialBuf, int bodyStart, int alreadyRead, int maxAllowed, out bool payloadTooLarge)
+        {
+            payloadTooLarge = false;
+            var raw = new List<byte>(Math.Max(1024, alreadyRead));
+            for (int i = 0; i < alreadyRead; i++) raw.Add(initialBuf[bodyStart + i]);
+
+            var decoded = new MemoryStream();
+            var tmp = new byte[4096];
+            int pos = 0;
+
+            Func<int, bool> ensureBytes = needed =>
+            {
+                while (raw.Count - pos < needed)
+                {
+                    int r = stream.Read(tmp, 0, tmp.Length);
+                    if (r <= 0) return false;
+                    for (int i = 0; i < r; i++) raw.Add(tmp[i]);
+                    if (raw.Count > maxAllowed + 65536) return false;
+                }
+                return true;
+            };
+
+            while (true)
+            {
+                // Find CRLF terminating chunk-size line
+                int lineEnd = -1;
+                while (lineEnd < 0)
+                {
+                    for (int i = pos; i <= raw.Count - 2; i++)
+                    {
+                        if (raw[i] == 13 && raw[i + 1] == 10)
+                        {
+                            lineEnd = i;
+                            break;
+                        }
+                    }
+                    if (lineEnd < 0)
+                    {
+                        int r = stream.Read(tmp, 0, tmp.Length);
+                        if (r <= 0) break;
+                        for (int i = 0; i < r; i++) raw.Add(tmp[i]);
+                        if (raw.Count > maxAllowed + 65536) { payloadTooLarge = true; return ""; }
+                    }
+                }
+                if (lineEnd < 0) break;
+
+                string sizeLine = Encoding.ASCII.GetString(raw.GetRange(pos, lineEnd - pos).ToArray()).Trim();
+                int semi = sizeLine.IndexOf(';');
+                if (semi >= 0) sizeLine = sizeLine.Substring(0, semi).Trim();
+                pos = lineEnd + 2;
+
+                int chunkSize;
+                if (!int.TryParse(sizeLine, System.Globalization.NumberStyles.HexNumber, System.Globalization.CultureInfo.InvariantCulture, out chunkSize) || chunkSize < 0)
+                    break;
+                if (chunkSize == 0) break;
+
+                if (decoded.Length + chunkSize > maxAllowed)
+                {
+                    payloadTooLarge = true;
+                    return "";
+                }
+
+                if (!ensureBytes(chunkSize + 2)) break;
+                decoded.Write(raw.GetRange(pos, chunkSize).ToArray(), 0, chunkSize);
+                pos += chunkSize + 2; // skip chunk data + trailing CRLF
+            }
+
+            return Encoding.UTF8.GetString(decoded.ToArray());
         }
 
         private static int FindHeaderEnd(byte[] arr)
@@ -1217,24 +1323,51 @@ namespace SmartMarketplace
 
         private static void HandlePinLogin(SimpleHttpRequest req, NetworkStream stream, bool isHttps)
         {
-            if (!Security.CheckRateLimit("pin_login", 8))
+            if (!Security.CheckRateLimit("pin_login", 12))
             {
                 WriteJson(stream, 429, new { ok = false, error = "Çok fazla hatalı deneme. Lütfen 1 dakika bekleyin." });
                 return;
             }
             try
             {
-                var body = Storage.Deserialize<Dictionary<string, object>>(req.Body);
-                string pin = body != null && body.ContainsKey("pin") ? Convert.ToString(body["pin"]).Trim() : "";
+                string ct = req.Headers.ContainsKey("Content-Type") ? (req.Headers["Content-Type"] ?? "") : "";
+                bool isForm = ct.IndexOf("application/x-www-form-urlencoded", StringComparison.OrdinalIgnoreCase) >= 0;
+                string rawPin = "";
+                if (isForm)
+                {
+                    foreach (var pair in (req.Body ?? "").Split('&'))
+                    {
+                        int eq = pair.IndexOf('=');
+                        if (eq > 0 && pair.Substring(0, eq).Equals("pin", StringComparison.OrdinalIgnoreCase))
+                        {
+                            rawPin = Uri.UnescapeDataString(pair.Substring(eq + 1).Replace("+", " "));
+                            break;
+                        }
+                    }
+                }
+                else
+                {
+                    var body = Storage.Deserialize<Dictionary<string, object>>(req.Body);
+                    rawPin = body != null && body.ContainsKey("pin") ? Convert.ToString(body["pin"]) : "";
+                }
+                // Strip any spaces or dashes (e.g. "350 377" -> "350377")
+                string pin = System.Text.RegularExpressions.Regex.Replace(rawPin ?? "", @"\D+", "");
                 var db = Storage.Load();
                 if (!Security.FixedTimeEquals(pin, db.RemoteConfig.AccessPin))
                 {
-                    WriteJson(stream, 401, new { ok = false, error = "Güvenlik PIN kodu hatalı. Bilgisayarınızdaki Smart > Mobil menüsünden PIN kodunu kontrol edin." });
+                    WriteJson(stream, 401, new { ok = false, error = "Güvenlik PIN kodu hatalı. Bilgisayarınızdaki Smart > Mobil penceresindeki 6 haneli PIN kodunu girin." });
                     return;
                 }
                 string cookie = "smart_remote_auth=" + Security.RemoteAuthCookieToken + "; Path=/; HttpOnly; SameSite=Lax; Max-Age=86400" + (isHttps ? "; Secure" : "");
-                string json = Storage.Serialize(new { ok = true });
-                WriteResponse(stream, 200, "application/json; charset=utf-8", Encoding.UTF8.GetBytes(json), cookie);
+                if (isForm)
+                {
+                    WriteResponse(stream, 303, "text/plain; charset=utf-8", new byte[0], cookie, "/?ok=" + DateTime.UtcNow.Ticks);
+                }
+                else
+                {
+                    string json = Storage.Serialize(new { ok = true });
+                    WriteResponse(stream, 200, "application/json; charset=utf-8", Encoding.UTF8.GetBytes(json), cookie);
+                }
             }
             catch
             {
@@ -1291,13 +1424,14 @@ namespace SmartMarketplace
             WriteResponse(stream, 200, ct, bytes);
         }
 
-        private static void WriteResponse(NetworkStream stream, int statusCode, string contentType, byte[] body, string setCookieHeader = null)
+        private static void WriteResponse(NetworkStream stream, int statusCode, string contentType, byte[] body, string setCookieHeader = null, string locationHeader = null)
         {
             string statusText;
             switch (statusCode)
             {
                 case 200: statusText = "OK"; break;
                 case 204: statusText = "No Content"; break;
+                case 303: statusText = "See Other"; break;
                 case 400: statusText = "Bad Request"; break;
                 case 401: statusText = "Unauthorized"; break;
                 case 403: statusText = "Forbidden"; break;
@@ -1310,16 +1444,20 @@ namespace SmartMarketplace
             // Hardened security headers — NO wildcard CORS, strict CSP without unsafe-inline scripts
             string csp = "default-src 'self'; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'";
             string cookieLine = string.IsNullOrEmpty(setCookieHeader) ? "" : ("Set-Cookie: " + setCookieHeader + "\r\n");
+            string locLine = string.IsNullOrEmpty(locationHeader) ? "" : ("Location: " + locationHeader + "\r\n");
             string header = "HTTP/1.1 " + statusCode + " " + statusText + "\r\n"
                 + "Content-Type: " + contentType + "\r\n"
                 + "Content-Length: " + body.Length + "\r\n"
                 + cookieLine
+                + locLine
                 + "X-Content-Type-Options: nosniff\r\n"
                 + "X-Frame-Options: DENY\r\n"
                 + "Referrer-Policy: no-referrer\r\n"
                 + "Permissions-Policy: camera=(), microphone=(), geolocation=()\r\n"
                 + "Content-Security-Policy: " + csp + "\r\n"
-                + "Cache-Control: no-store, no-cache, must-revalidate\r\n"
+                + "Cache-Control: no-store, no-cache, must-revalidate, max-age=0\r\n"
+                + "Pragma: no-cache\r\n"
+                + "Expires: 0\r\n"
                 + "Connection: close\r\n\r\n";
             byte[] hBytes = Encoding.ASCII.GetBytes(header);
             stream.Write(hBytes, 0, hBytes.Length);

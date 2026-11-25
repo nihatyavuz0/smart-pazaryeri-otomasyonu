@@ -103,7 +103,8 @@ namespace SmartMarketplace
                 return false;
             }
 
-            var readyEvent = new ManualResetEventSlim(false);
+            var urlReadyEvent = new ManualResetEventSlim(false);
+            var connReadyEvent = new ManualResetEventSlim(false);
             string foundUrl = "";
             string capturedErr = "";
 
@@ -128,7 +129,11 @@ namespace SmartMarketplace
                     if (m.Success && string.IsNullOrEmpty(foundUrl))
                     {
                         foundUrl = m.Value.Trim();
-                        readyEvent.Set();
+                        urlReadyEvent.Set();
+                    }
+                    if (e.Data.IndexOf("Registered tunnel connection", StringComparison.OrdinalIgnoreCase) >= 0)
+                    {
+                        connReadyEvent.Set();
                     }
                     else if (e.Data.IndexOf("ERR", StringComparison.OrdinalIgnoreCase) >= 0)
                     {
@@ -144,7 +149,7 @@ namespace SmartMarketplace
 
                 lock (_lock) { _proc = proc; }
 
-                bool signaled = readyEvent.Wait(18000);
+                bool signaled = urlReadyEvent.Wait(18000);
                 if (signaled && !string.IsNullOrEmpty(foundUrl))
                 {
                     Uri parsed;
@@ -152,6 +157,10 @@ namespace SmartMarketplace
                     {
                         Security.ActiveTunnelHost = parsed.Host;
                     }
+                    // Wait briefly for Cloudflare edge tunnel registration & DNS propagation so phone connects on first try
+                    connReadyEvent.Wait(8000);
+                    WaitForPublicUrlReady(foundUrl + "/favicon.png", 12000);
+
                     lock (_lock)
                     {
                         _publicUrl = foundUrl + "/";
@@ -180,6 +189,28 @@ namespace SmartMarketplace
                     StopInternal();
                 }
                 return false;
+            }
+        }
+
+        private static void WaitForPublicUrlReady(string probeUrl, int maxWaitMs)
+        {
+            var sw = Stopwatch.StartNew();
+            while (sw.ElapsedMilliseconds < maxWaitMs)
+            {
+                try
+                {
+                    var req = (HttpWebRequest)WebRequest.Create(probeUrl);
+                    req.Method = "GET";
+                    req.Timeout = 3500;
+                    req.ReadWriteTimeout = 3500;
+                    req.AllowAutoRedirect = false;
+                    using (var resp = (HttpWebResponse)req.GetResponse())
+                    {
+                        if ((int)resp.StatusCode == 200) return;
+                    }
+                }
+                catch { }
+                Thread.Sleep(700);
             }
         }
 

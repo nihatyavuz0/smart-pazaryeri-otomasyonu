@@ -256,9 +256,9 @@ namespace SmartMarketplace
             foreach (var part in raw.Split(';'))
             {
                 string p = part.Trim();
-                if (p.StartsWith("smart_remote_auth="))
+                if (p.StartsWith("smart_remote_auth=", StringComparison.OrdinalIgnoreCase))
                 {
-                    string val = p.Substring("smart_remote_auth=".Length).Trim();
+                    string val = p.Substring("smart_remote_auth=".Length).Trim().Trim('"');
                     if (FixedTimeEquals(val, RemoteAuthCookieToken)) return true;
                 }
             }
@@ -276,8 +276,12 @@ namespace SmartMarketplace
                 return true;
 
             string tunnelHost = ActiveTunnelHost;
-            if (!string.IsNullOrEmpty(tunnelHost) && h == tunnelHost.ToLowerInvariant())
-                return true;
+            if (!string.IsNullOrEmpty(tunnelHost))
+            {
+                string th = tunnelHost.ToLowerInvariant();
+                if (h == th || h == (th + ":443") || h == (th + ":80"))
+                    return true;
+            }
 
             foreach (var lanIp in GetLocalLanIpv4Addresses())
             {
@@ -293,13 +297,17 @@ namespace SmartMarketplace
             if (headers.ContainsKey("Origin"))
             {
                 string origin = (headers["Origin"] ?? "").Trim().ToLowerInvariant();
-                if (!string.IsNullOrEmpty(origin))
+                if (!string.IsNullOrEmpty(origin) && origin != "null")
                 {
                     bool allowed = origin == ("http://localhost:" + port)
                         || origin == ("http://127.0.0.1:" + port);
                     string tunnelHost = ActiveTunnelHost;
-                    if (!allowed && !string.IsNullOrEmpty(tunnelHost) && origin == ("https://" + tunnelHost.ToLowerInvariant()))
-                        allowed = true;
+                    if (!allowed && !string.IsNullOrEmpty(tunnelHost))
+                    {
+                        string th = tunnelHost.ToLowerInvariant();
+                        if (origin == ("https://" + th) || origin == ("https://" + th + ":443"))
+                            allowed = true;
+                    }
                     if (!allowed)
                     {
                         foreach (var lanIp in GetLocalLanIpv4Addresses())
@@ -317,9 +325,10 @@ namespace SmartMarketplace
             if (headers.ContainsKey("Sec-Fetch-Site"))
             {
                 string sfs = (headers["Sec-Fetch-Site"] ?? "").Trim().ToLowerInvariant();
-                string sfm = headers.ContainsKey("Sec-Fetch-Mode") ? (headers["Sec-Fetch-Mode"] ?? "").Trim().ToLowerInvariant() : "";
-                bool isTopLevelGetNav = sfm == "navigate" && (string.Equals(method, "GET", StringComparison.OrdinalIgnoreCase) || string.Equals(method, "HEAD", StringComparison.OrdinalIgnoreCase));
-                if (sfs == "cross-site" && !isTopLevelGetNav) return false;
+                bool isSafeRead = string.Equals(method, "GET", StringComparison.OrdinalIgnoreCase)
+                    || string.Equals(method, "HEAD", StringComparison.OrdinalIgnoreCase)
+                    || string.Equals(method, "OPTIONS", StringComparison.OrdinalIgnoreCase);
+                if (sfs == "cross-site" && !isSafeRead) return false;
             }
             return true;
         }

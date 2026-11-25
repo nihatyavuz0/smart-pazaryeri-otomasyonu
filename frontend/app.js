@@ -87,7 +87,7 @@ function startLiveUpdateSync() {
   async function pollVersion() {
     if (updateReloadPending) return;
     try {
-      const res = await fetch('/api/version', { cache: 'no-store' });
+      const res = await fetch('/api/version', { cache: 'no-store', credentials: 'same-origin' });
       if (res.status === 401) {
         updateReloadPending = true;
         window.location.reload();
@@ -148,7 +148,7 @@ async function apiFetch(url, options = {}) {
     'X-Smart-Token': SESSION_TOKEN,
     ...(options.headers || {})
   };
-  const res = await fetch(url, { ...options, headers });
+  const res = await fetch(url, { credentials: 'same-origin', ...options, headers });
   if (res.status === 401 && !updateReloadPending) {
     updateReloadPending = true;
     window.location.reload();
@@ -409,8 +409,7 @@ function fallbackCopy(text, onDone) {
 
 function formatPinDisplay(pin) {
   const s = String(pin || '').replace(/\D+/g, '');
-  if (s.length === 6) return s.slice(0, 3) + ' ' + s.slice(3);
-  return s || '------';
+  return s.length === 6 ? s : '------';
 }
 
 function buildRemoteModalBody(info) {
