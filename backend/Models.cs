@@ -7,6 +7,7 @@ namespace SmartMarketplace
     {
         public AiSettings AiConfig { get; set; }
         public SyncSettings SyncConfig { get; set; }
+        public RemoteAccessSettings RemoteConfig { get; set; }
         public DraftWorkspace Draft { get; set; }
         public List<MarketplaceConfig> Marketplaces { get; set; }
         public List<ProductRecord> Products { get; set; }
@@ -16,10 +17,23 @@ namespace SmartMarketplace
         {
             AiConfig = new AiSettings();
             SyncConfig = new SyncSettings();
+            RemoteConfig = new RemoteAccessSettings();
             Draft = new DraftWorkspace();
             Marketplaces = new List<MarketplaceConfig>();
             Products = new List<ProductRecord>();
             Logs = new List<ActivityLog>();
+        }
+    }
+
+    public class RemoteAccessSettings
+    {
+        public bool AutoStartTunnel { get; set; }
+        public string AccessPin { get; set; }
+
+        public RemoteAccessSettings()
+        {
+            AutoStartTunnel = false;
+            AccessPin = "";
         }
     }
 

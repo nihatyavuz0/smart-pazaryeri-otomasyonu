@@ -73,12 +73,18 @@ namespace SmartMarketplace
             _syncTimer = new Timer(BackgroundSyncTick, null, 60000, 60000);
             // Hot-update watcher: checks every 1.5s for SmartServer_update.exe
             _updateTimer = new Timer(CheckForHotUpdate, null, 1500, 1500);
-            // Pre-warm Trendyol official category tree in background so publishing & searching is instant
+            // Pre-warm Trendyol official category tree & auto-resume remote tunnel if user enabled it
             ThreadPool.QueueUserWorkItem(_ =>
             {
                 try
                 {
                     var dbInit = Storage.Load();
+                    if (dbInit.RemoteConfig != null && dbInit.RemoteConfig.AutoStartTunnel)
+                    {
+                        string tUrl, tErr;
+                        if (TunnelService.StartTunnel(_port, out tUrl, out tErr))
+                            Console.WriteLine("  Her Yerden: " + tUrl + " (PIN Korumalı)");
+                    }
                     var tyCfg = dbInit.Marketplaces.Find(m => m.Id == "trendyol");
                     if (tyCfg != null && !tyCfg.SimulationMode && MarketplaceConnectors.HasRequiredCredentials(tyCfg))
                     {
@@ -135,6 +141,7 @@ namespace SmartMarketplace
 
             if (_restartingForUpdate)
             {
+                TunnelService.StopTunnel();
                 if (!_isSupervised)
                 {
                     // Self-swap and relaunch even if user launched SmartServer.exe directly without Smart.bat
@@ -235,7 +242,7 @@ namespace SmartMarketplace
                         }
 
                         // 2. Cross-Site Origin Guard
-                        if (!Security.IsValidOriginHeader(req.Headers, _port))
+                        if (!Security.IsValidOriginHeader(req.Headers, _port, req.Method))
                         {
                             WriteJson(stream, 403, new { ok = false, error = "Çapraz kaynak (Cross-Origin) isteği güvenlik nedeniyle engellendi." });
                             return;
@@ -261,15 +268,51 @@ namespace SmartMarketplace
                         string path = rawPath.TrimEnd('/');
                         if (string.IsNullOrEmpty(path)) path = "/";
 
+                        // 3. Remote HTTPS Tunnel PIN Gate (protects remote access from any network with 6-digit PIN + HttpOnly cookie)
+                        bool isTunnel = Security.IsTunnelRequest(req.Headers);
+                        bool remoteAuthed = !isTunnel || Security.HasValidRemoteCookie(req.Headers);
+
+                        if (path == "/api/auth/pin" && req.Method == "POST")
+                        {
+                            HandlePinLogin(req, stream, isTunnel);
+                            return;
+                        }
+
+                        if (!remoteAuthed)
+                        {
+                            if (path == "/styles.css" || path == "/pin.js" || path == "/logo.png" || path == "/favicon.png" || path == "/manifest.json")
+                            {
+                                string assetPath;
+                                if (Security.TryResolveSafePath(_frontendDir, path.TrimStart('/'), out assetPath) && File.Exists(assetPath))
+                                {
+                                    ServeFile(assetPath, stream, false);
+                                    return;
+                                }
+                            }
+                            if (path.StartsWith("/api/"))
+                            {
+                                WriteJson(stream, 401, new { ok = false, error = "Uzaktan erişim için PIN doğrulaması gereklidir." });
+                                return;
+                            }
+                            string pinHtmlPath;
+                            if (Security.TryResolveSafePath(_frontendDir, "pin.html", out pinHtmlPath) && File.Exists(pinHtmlPath))
+                                ServeFile(pinHtmlPath, stream, false);
+                            else
+                                WriteResponse(stream, 401, "text/plain; charset=utf-8", Encoding.UTF8.GetBytes("PIN Gerekli"));
+                            return;
+                        }
+
                         if (path == "/api/version" && req.Method == "GET")
                         {
-                            // Read-only non-sensitive version beacon (still Host & Origin protected) so open browser tabs auto-sync after hot-updates
+                            // Read-only non-sensitive version beacon (Host & Origin protected) so all browsers & devices stay in real-time sync
                             WriteJson(stream, 200, new
                             {
                                 ok = true,
-                                appVersion = "v3.5",
+                                appVersion = "v3.6",
                                 serverId = _serverInstanceId,
-                                frontendVersion = ComputeFrontendVersion()
+                                frontendVersion = ComputeFrontendVersion(),
+                                dataVersion = Storage.GetDataVersion(),
+                                tunnelActive = TunnelService.IsActive
                             });
                             return;
                         }
@@ -281,14 +324,79 @@ namespace SmartMarketplace
                                 WriteJson(stream, 403, new { ok = false, error = "Yetkisiz istek." });
                                 return;
                             }
+                            var dbNet = Storage.Load();
                             var lanIps = Security.GetLocalLanIpv4Addresses();
                             WriteJson(stream, 200, new
                             {
                                 ok = true,
                                 port = _port,
                                 localUrl = "http://localhost:" + _port + "/",
-                                mobileUrls = lanIps.Select(ip => "http://" + ip + ":" + _port + "/").ToArray()
+                                mobileUrls = lanIps.Select(ip => "http://" + ip + ":" + _port + "/").ToArray(),
+                                tunnelActive = TunnelService.IsActive,
+                                tunnelUrl = TunnelService.PublicUrl,
+                                accessPin = dbNet.RemoteConfig.AccessPin,
+                                autoStartTunnel = dbNet.RemoteConfig.AutoStartTunnel
                             });
+                            return;
+                        }
+
+                        if (path == "/api/remote/start" && req.Method == "POST")
+                        {
+                            if (!Security.IsValidSessionToken(req.Headers))
+                            {
+                                WriteJson(stream, 403, new { ok = false, error = "Yetkisiz istek." });
+                                return;
+                            }
+                            string tUrl, tErr;
+                            bool started = TunnelService.StartTunnel(_port, out tUrl, out tErr);
+                            if (!started)
+                            {
+                                WriteJson(stream, 500, new { ok = false, error = tErr });
+                                return;
+                            }
+                            var dbRem = Storage.Load();
+                            dbRem.RemoteConfig.AutoStartTunnel = true;
+                            Storage.AddLog(dbRem, "system", "success", "Uzaktan Erişim", "Her yerden güvenli HTTPS erişim bağlantısı başlatıldı (PIN korumalı).", tUrl);
+                            Storage.Save(dbRem);
+                            WriteJson(stream, 200, new
+                            {
+                                ok = true,
+                                tunnelActive = true,
+                                tunnelUrl = tUrl,
+                                accessPin = dbRem.RemoteConfig.AccessPin
+                            });
+                            return;
+                        }
+
+                        if (path == "/api/remote/stop" && req.Method == "POST")
+                        {
+                            if (!Security.IsValidSessionToken(req.Headers))
+                            {
+                                WriteJson(stream, 403, new { ok = false, error = "Yetkisiz istek." });
+                                return;
+                            }
+                            TunnelService.StopTunnel();
+                            var dbRem = Storage.Load();
+                            dbRem.RemoteConfig.AutoStartTunnel = false;
+                            Storage.AddLog(dbRem, "system", "info", "Uzaktan Erişim", "Her yerden erişim tünel bağlantısı kapatıldı.");
+                            Storage.Save(dbRem);
+                            WriteJson(stream, 200, new { ok = true, tunnelActive = false });
+                            return;
+                        }
+
+                        if (path == "/api/remote/regenerate-pin" && req.Method == "POST")
+                        {
+                            if (!Security.IsValidSessionToken(req.Headers))
+                            {
+                                WriteJson(stream, 403, new { ok = false, error = "Yetkisiz istek." });
+                                return;
+                            }
+                            var dbRem = Storage.Load();
+                            dbRem.RemoteConfig.AccessPin = Security.Generate6DigitPin();
+                            Security.RotateRemoteCookieToken();
+                            Storage.AddLog(dbRem, "system", "info", "Uzaktan Erişim", "Uzaktan erişim güvenlik PIN'i yenilendi; eski uzak oturumlar sonlandırıldı.");
+                            Storage.Save(dbRem);
+                            WriteJson(stream, 200, new { ok = true, accessPin = dbRem.RemoteConfig.AccessPin });
                             return;
                         }
 
@@ -1107,11 +1215,38 @@ namespace SmartMarketplace
             WriteResponse(stream, 200, "text/html; charset=utf-8", Encoding.UTF8.GetBytes(html));
         }
 
+        private static void HandlePinLogin(SimpleHttpRequest req, NetworkStream stream, bool isHttps)
+        {
+            if (!Security.CheckRateLimit("pin_login", 8))
+            {
+                WriteJson(stream, 429, new { ok = false, error = "Çok fazla hatalı deneme. Lütfen 1 dakika bekleyin." });
+                return;
+            }
+            try
+            {
+                var body = Storage.Deserialize<Dictionary<string, object>>(req.Body);
+                string pin = body != null && body.ContainsKey("pin") ? Convert.ToString(body["pin"]).Trim() : "";
+                var db = Storage.Load();
+                if (!Security.FixedTimeEquals(pin, db.RemoteConfig.AccessPin))
+                {
+                    WriteJson(stream, 401, new { ok = false, error = "Güvenlik PIN kodu hatalı. Bilgisayarınızdaki Smart > Mobil menüsünden PIN kodunu kontrol edin." });
+                    return;
+                }
+                string cookie = "smart_remote_auth=" + Security.RemoteAuthCookieToken + "; Path=/; HttpOnly; SameSite=Lax; Max-Age=86400" + (isHttps ? "; Secure" : "");
+                string json = Storage.Serialize(new { ok = true });
+                WriteResponse(stream, 200, "application/json; charset=utf-8", Encoding.UTF8.GetBytes(json), cookie);
+            }
+            catch
+            {
+                WriteJson(stream, 400, new { ok = false, error = "Geçersiz PIN isteği." });
+            }
+        }
+
         private static void WriteJson(NetworkStream stream, int statusCode, object data)
         {
             string json = Storage.Serialize(data);
             byte[] bytes = Encoding.UTF8.GetBytes(json);
-            WriteResponse(stream, statusCode, "application/json; charset=utf-8", bytes);
+            WriteResponse(stream, statusCode, "application/json; charset=utf-8", bytes, null);
         }
 
         private static void ServeFile(string filePath, NetworkStream stream, bool isUpload)
@@ -1156,7 +1291,7 @@ namespace SmartMarketplace
             WriteResponse(stream, 200, ct, bytes);
         }
 
-        private static void WriteResponse(NetworkStream stream, int statusCode, string contentType, byte[] body)
+        private static void WriteResponse(NetworkStream stream, int statusCode, string contentType, byte[] body, string setCookieHeader = null)
         {
             string statusText;
             switch (statusCode)
@@ -1164,6 +1299,7 @@ namespace SmartMarketplace
                 case 200: statusText = "OK"; break;
                 case 204: statusText = "No Content"; break;
                 case 400: statusText = "Bad Request"; break;
+                case 401: statusText = "Unauthorized"; break;
                 case 403: statusText = "Forbidden"; break;
                 case 404: statusText = "Not Found"; break;
                 case 413: statusText = "Payload Too Large"; break;
@@ -1173,9 +1309,11 @@ namespace SmartMarketplace
 
             // Hardened security headers — NO wildcard CORS, strict CSP without unsafe-inline scripts
             string csp = "default-src 'self'; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'";
+            string cookieLine = string.IsNullOrEmpty(setCookieHeader) ? "" : ("Set-Cookie: " + setCookieHeader + "\r\n");
             string header = "HTTP/1.1 " + statusCode + " " + statusText + "\r\n"
                 + "Content-Type: " + contentType + "\r\n"
                 + "Content-Length: " + body.Length + "\r\n"
+                + cookieLine
                 + "X-Content-Type-Options: nosniff\r\n"
                 + "X-Frame-Options: DENY\r\n"
                 + "Referrer-Policy: no-referrer\r\n"

@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <meta name="theme-color" content="#EAECE6" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-title" content="Smart" />
+  <link rel="manifest" href="/manifest.json" />
+  <link rel="icon" type="image/png" href="/favicon.png" />
+  <link rel="apple-touch-icon" href="/logo.png" />
+  <title>Smart — Güvenli Uzaktan Giriş</title>
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body class="pin-page">
+  <main class="pin-shell">
+    <section class="pin-card">
+      <div class="pin-brand-mark">
+        <img src="/logo.png" alt="Smart Logo" />
+      </div>
+      <div class="pin-eyebrow">Smart Uzaktan Erişim</div>
+      <h1 class="pin-title">Güvenlik PIN Kodu</h1>
+      <p class="pin-subtitle">Bilgisayarınızdaki <strong>Smart &rarr; Mobil / Her Yerden Erişim</strong> penceresinde görünen 6 haneli PIN kodunu girin.</p>
+
+      <form id="pin-form" class="pin-form" autocomplete="off">
+        <input
+          type="text"
+          id="pin-input"
+          class="pin-input"
+          inputmode="numeric"
+          pattern="[0-9]*"
+          maxlength="6"
+          autocomplete="one-time-code"
+          placeholder="000000"
+          aria-label="6 haneli güvenlik PIN kodu"
+          autofocus
+        />
+        <div id="pin-error" class="pin-error hidden" role="alert"></div>
+        <button type="submit" id="pin-submit" class="btn btn-primary btn-full pin-btn">Panele Giriş Yap</button>
+      </form>
+
+      <div class="pin-foot">
+        <span class="pin-dot"></span>
+        <span>Uçtan uca HTTPS şifreli • Tüm cihazlarınızla canlı senkron</span>
+      </div>
+    </section>
+  </main>
+  <script src="/pin.js"></script>
+</body>
+</html>

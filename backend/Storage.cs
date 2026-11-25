@@ -10,10 +10,16 @@ namespace SmartMarketplace
     {
         private static readonly object _lock = new object();
         private static readonly JavaScriptSerializer _json = new JavaScriptSerializer { MaxJsonLength = int.MaxValue, RecursionLimit = 200 };
+        private static long _dataVersionCounter = DateTime.UtcNow.Ticks;
         public static string DataDir { get; private set; }
         public static string UploadsDir { get; private set; }
         public static string DbPath { get; private set; }
         public static string BackupPath { get; private set; }
+
+        public static string GetDataVersion()
+        {
+            return System.Threading.Interlocked.Read(ref _dataVersionCounter).ToString("x");
+        }
 
         public static void Initialize(string rootDir)
         {
@@ -173,6 +179,7 @@ namespace SmartMarketplace
                 File.Delete(DbPath);
             }
             File.Move(tmp, DbPath);
+            System.Threading.Interlocked.Increment(ref _dataVersionCounter);
         }
 
         public static void AddLog(AppDatabase db, string type, string level, string marketplace, string message, string details = "")
@@ -254,6 +261,8 @@ namespace SmartMarketplace
         {
             if (db.AiConfig == null) db.AiConfig = new AiSettings();
             if (db.SyncConfig == null) db.SyncConfig = new SyncSettings();
+            if (db.RemoteConfig == null) db.RemoteConfig = new RemoteAccessSettings();
+            if (string.IsNullOrWhiteSpace(db.RemoteConfig.AccessPin)) db.RemoteConfig.AccessPin = Security.Generate6DigitPin();
             if (db.Draft == null) db.Draft = new DraftWorkspace();
             if (db.Draft.UploadedImages == null) db.Draft.UploadedImages = new List<string>();
             if (db.Draft.SelectedTargetMps == null) db.Draft.SelectedTargetMps = new List<string>();

@@ -17,10 +17,26 @@ namespace SmartMarketplace
         public const string EncryptedPrefix = "dpapi:v1:";
         public const string MaskedTokenPrefix = "••••••••";
         public static string SessionToken { get; private set; }
+        public static string RemoteAuthCookieToken { get; private set; }
+        public static volatile string ActiveTunnelHost = "";
 
         static Security()
         {
             SessionToken = GenerateSecureToken(32);
+            RemoteAuthCookieToken = GenerateSecureToken(32);
+        }
+
+        public static void RotateRemoteCookieToken()
+        {
+            RemoteAuthCookieToken = GenerateSecureToken(32);
+        }
+
+        public static string Generate6DigitPin()
+        {
+            var bytes = new byte[4];
+            using (var rng = new RNGCryptoServiceProvider()) rng.GetBytes(bytes);
+            uint val = BitConverter.ToUInt32(bytes, 0) % 900000 + 100000;
+            return val.ToString();
         }
 
         public static string GenerateSecureToken(int numBytes)
@@ -107,6 +123,10 @@ namespace SmartMarketplace
                 db.AiConfig.GeminiApiKey = EncryptSecret(db.AiConfig.GeminiApiKey);
                 db.AiConfig.OpenAiApiKey = EncryptSecret(db.AiConfig.OpenAiApiKey);
             }
+            if (db.RemoteConfig != null)
+            {
+                db.RemoteConfig.AccessPin = EncryptSecret(db.RemoteConfig.AccessPin);
+            }
             if (db.Marketplaces != null)
             {
                 foreach (var mp in db.Marketplaces)
@@ -129,6 +149,10 @@ namespace SmartMarketplace
             {
                 db.AiConfig.GeminiApiKey = DecryptSecret(db.AiConfig.GeminiApiKey);
                 db.AiConfig.OpenAiApiKey = DecryptSecret(db.AiConfig.OpenAiApiKey);
+            }
+            if (db.RemoteConfig != null)
+            {
+                db.RemoteConfig.AccessPin = DecryptSecret(db.RemoteConfig.AccessPin);
             }
             if (db.Marketplaces != null)
             {
@@ -153,6 +177,10 @@ namespace SmartMarketplace
             {
                 clone.AiConfig.GeminiApiKey = stripCompletely ? "" : MaskSecret(clone.AiConfig.GeminiApiKey);
                 clone.AiConfig.OpenAiApiKey = stripCompletely ? "" : MaskSecret(clone.AiConfig.OpenAiApiKey);
+            }
+            if (clone.RemoteConfig != null && stripCompletely)
+            {
+                clone.RemoteConfig.AccessPin = "";
             }
             if (clone.Marketplaces != null)
             {
@@ -208,6 +236,35 @@ namespace SmartMarketplace
             return false;
         }
 
+        public static bool IsTunnelRequest(Dictionary<string, string> headers)
+        {
+            if (headers == null) return false;
+            if (headers.ContainsKey("CF-Connecting-IP") || headers.ContainsKey("Cf-Ray")) return true;
+            string activeHost = ActiveTunnelHost;
+            if (!string.IsNullOrEmpty(activeHost) && headers.ContainsKey("Host"))
+            {
+                string h = (headers["Host"] ?? "").Trim().ToLowerInvariant();
+                if (h == activeHost.ToLowerInvariant()) return true;
+            }
+            return false;
+        }
+
+        public static bool HasValidRemoteCookie(Dictionary<string, string> headers)
+        {
+            if (headers == null || !headers.ContainsKey("Cookie")) return false;
+            string raw = headers["Cookie"] ?? "";
+            foreach (var part in raw.Split(';'))
+            {
+                string p = part.Trim();
+                if (p.StartsWith("smart_remote_auth="))
+                {
+                    string val = p.Substring("smart_remote_auth=".Length).Trim();
+                    if (FixedTimeEquals(val, RemoteAuthCookieToken)) return true;
+                }
+            }
+            return false;
+        }
+
         public static bool IsValidHostHeader(string host, int port)
         {
             if (string.IsNullOrWhiteSpace(host)) return false;
@@ -218,6 +275,10 @@ namespace SmartMarketplace
                 || (port == 80 && (h == "localhost" || h == "127.0.0.1")))
                 return true;
 
+            string tunnelHost = ActiveTunnelHost;
+            if (!string.IsNullOrEmpty(tunnelHost) && h == tunnelHost.ToLowerInvariant())
+                return true;
+
             foreach (var lanIp in GetLocalLanIpv4Addresses())
             {
                 if (h == (lanIp + ":" + port) || (port == 80 && h == lanIp))
@@ -226,7 +287,7 @@ namespace SmartMarketplace
             return false;
         }
 
-        public static bool IsValidOriginHeader(Dictionary<string, string> headers, int port)
+        public static bool IsValidOriginHeader(Dictionary<string, string> headers, int port, string method = "GET")
         {
             if (headers == null) return true;
             if (headers.ContainsKey("Origin"))
@@ -236,6 +297,9 @@ namespace SmartMarketplace
                 {
                     bool allowed = origin == ("http://localhost:" + port)
                         || origin == ("http://127.0.0.1:" + port);
+                    string tunnelHost = ActiveTunnelHost;
+                    if (!allowed && !string.IsNullOrEmpty(tunnelHost) && origin == ("https://" + tunnelHost.ToLowerInvariant()))
+                        allowed = true;
                     if (!allowed)
                     {
                         foreach (var lanIp in GetLocalLanIpv4Addresses())
@@ -253,7 +317,9 @@ namespace SmartMarketplace
             if (headers.ContainsKey("Sec-Fetch-Site"))
             {
                 string sfs = (headers["Sec-Fetch-Site"] ?? "").Trim().ToLowerInvariant();
-                if (sfs == "cross-site") return false;
+                string sfm = headers.ContainsKey("Sec-Fetch-Mode") ? (headers["Sec-Fetch-Mode"] ?? "").Trim().ToLowerInvariant() : "";
+                bool isTopLevelGetNav = sfm == "navigate" && (string.Equals(method, "GET", StringComparison.OrdinalIgnoreCase) || string.Equals(method, "HEAD", StringComparison.OrdinalIgnoreCase));
+                if (sfs == "cross-site" && !isTopLevelGetNav) return false;
             }
             return true;
         }

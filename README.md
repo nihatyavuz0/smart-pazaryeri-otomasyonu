@@ -1,6 +1,6 @@
-# Smart — Pazaryeri Ürün Yükleme & Stok Otomasyonu (v3.4)
+# Smart — Pazaryeri Ürün Yükleme & Stok Otomasyonu (v3.6)
 
-**Smart**, Türkiye'nin önde gelen pazaryerleri (**Trendyol, Hepsiburada, N11, İdefix, Pazarama, PttAVM ve Amazon TR**) için tek merkezden akıllı ürün yükleme, rakip analizi, SEO içerik üretimi, görsel optimizasyonu ve anlık stok senkronizasyonu sağlayan otomasyon programıdır.
+**Smart**, Türkiye'nin önde gelen pazaryerleri (**Trendyol, Hepsiburada, N11, İdefix, Pazarama, PttAVM ve Amazon TR**) için tek merkezden akıllı ürün yükleme, görsel tanıma, kanal bazlı izole rakip analizi, SEO içerik üretimi, görsel optimizasyonu, çoklu cihaz canlı senkronizasyonu ve anlık stok yönetimi sağlayan otomasyon programıdır.
 
 ---
 
@@ -10,11 +10,14 @@ Windows 10/11 üzerinde yerleşik `.NET Framework 4.8` ile çalışır; Node.js 
 
 1. Klasör içindeki **`Smart.bat`** dosyasına çift tıklayın *(ilk çalıştırmada `SmartServer.exe` otomatik derlenir)*.
 2. Tarayıcınızda otomatik olarak **`http://localhost:8765`** açılır.
-3. **Mobilden erişmek için:** Telefonunuz bilgisayar ile aynı Wi-Fi ağındayken sol alt menüdeki **`Mobil`** butonunda görünen yerel adresi (`http://192.168.x.x:8765/`) telefon tarayıcınızda açın; *"Ana Ekrana Ekle"* ile uygulama gibi kullanabilirsiniz.
+3. **Başka cihaz / tarayıcı / 4G-5G'den erişmek için:** Sol alt menüdeki **`Mobil`** (mobilde üst bardaki **`Bağlan`**) penceresinden **"Her Yerden Güvenli Linki Başlat (HTTPS)"** butonuna tıklayın. Oluşan şifreli `https://....trycloudflare.com` bağlantısı ve **6 haneli Güvenlik PIN** koduyla herhangi bir telefon, tablet veya tarayıcıdan bağlanabilir; tüm cihazlarda **canlı senkron** çalışabilirsiniz.
 
 ---
 
 ## Temel Özellikler
+
+- **Görselden Ürün Algılama & Kanal Bazlı İzole Araştırma (`VisionAnalyzer.cs`, `MarketplaceResearchEngine.cs`):** Yüklenen ürün fotoğrafını analiz ederek ürünü/markayı/kategoriyi tanır; her pazaryerini (Trendyol, Hepsiburada, N11, İdefix, Pazarama, PttAVM, Amazon TR) kendi kuralları ve rakipleriyle paralel ve izole olarak araştırır.
+- **Her Yerden HTTPS Erişim (PIN Korumalı) & Çoklu Cihaz Canlı Senkron (`TunnelService.cs`):** Tek tıkla ücretsiz şifreli Cloudflare HTTPS tüneli açar, uzak cihazları 6 haneli PIN + `HttpOnly; Secure` çerez ile korur ve açık tüm tarayıcılar/telefonlar arasında veri değişikliklerini ~2,5 saniyede otomatik senkronize eder.
 
 - **Görsel + Prompt ile Tam Otomatik Ürün Yükleme:** Görselleri sürükleyip ürün hakkında birkaç cümle yazın. Smart tüm pazaryerlerinin karakter limitine, SEO yapısına ve zorunlu alanlarına uygun başlık, açıklama ve teknik özellikleri otomatik oluşturur.
 - **Trendyol V2 Canlı İç Kategori & Zorunlu Özellik Motoru (`TrendyolCategoryEngine.cs`):**
@@ -42,18 +45,23 @@ Windows 10/11 üzerinde yerleşik `.NET Framework 4.8` ile çalışır; Node.js 
 │   ├── Program.cs                   # Yerel HTTP sunucusu, REST API, zamanlanmış stok senkronu
 │   ├── Models.cs                    # Veri modelleri
 │   ├── Security.cs                  # DPAPI şifreleme, CSRF/Host/LAN koruması, hız sınırı
-│   ├── Storage.cs                   # Atomik JSON veritabanı ve otomatik yedekleme
+│   ├── Storage.cs                   # Atomik JSON veritabanı, veri sürüm sayacı ve otomatik yedekleme
+│   ├── TunnelService.cs             # Cloudflare HTTPS uzaktan erişim tünel yöneticisi
 │   ├── ComplianceGuard.cs           # Yasaklı kelime ve pazaryeri politika filtresi
 │   ├── ImageHostService.cs          # 1200x1800 RGB .jpg dönüştürücü ve CDN yükleyici
 │   ├── TrendyolCategoryEngine.cs    # 4 aşamalı Trendyol iç kategori & V2 özellik motoru
 │   ├── MarketplaceSchema.cs         # 7 pazaryeri zorunlu alan şemaları
 │   ├── CompetitorAnalyzer.cs        # Canlı rakip analizi ve eksik bilgi tamamlama
+│   ├── VisionAnalyzer.cs            # Görselden ürün, marka ve kategori algılama motoru
+│   ├── MarketplaceResearchEngine.cs # 7 pazaryeri paralel & izole araştırma motoru
 │   ├── AiContentEngine.cs           # Gemini / OpenAI / Yerleşik Türkçe SEO motoru
 │   └── MarketplaceConnectors.cs     # 7 pazaryeri canlı API bağlantıları
 └── frontend/
     ├── index.html                   # Masaüstü + Mobil PWA arayüz iskeleti
+    ├── pin.html                     # Uzaktan HTTPS erişim 6 haneli PIN giriş ekranı
+    ├── pin.js                       # CSP uyumlu PIN doğrulama denetleyicisi
     ├── styles.css                   # Taş grisi & yumuşak haki tema + mobil stil katmanı
-    ├── app.js                       # SPA denetleyici, Smart popup/toast ve oto-kayıt
+    ├── app.js                       # SPA denetleyici, çoklu cihaz canlı senkron ve oto-kayıt
     ├── manifest.json                # Mobil PWA manifest dosyası
     ├── logo.png                     # Smart şeffaf PNG logosu
     └── favicon.png                  # Tarayıcı sekme ikonu

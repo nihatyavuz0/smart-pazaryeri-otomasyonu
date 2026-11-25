@@ -78,6 +78,9 @@ document.addEventListener('DOMContentLoaded', () => {
 
 let knownServerId = null;
 let knownFrontendVersion = null;
+let knownDataVersion = null;
+let lastLocalWriteAt = 0;
+let isRemoteSyncInFlight = false;
 let updateReloadPending = false;
 
 function startLiveUpdateSync() {
@@ -85,6 +88,11 @@ function startLiveUpdateSync() {
     if (updateReloadPending) return;
     try {
       const res = await fetch('/api/version', { cache: 'no-store' });
+      if (res.status === 401) {
+        updateReloadPending = true;
+        window.location.reload();
+        return;
+      }
       if (!res.ok) {
         setTimeout(pollVersion, 1200);
         return;
@@ -93,6 +101,7 @@ function startLiveUpdateSync() {
       if (!knownServerId) {
         knownServerId = info.serverId;
         knownFrontendVersion = info.frontendVersion;
+        knownDataVersion = info.dataVersion || null;
         if (info.appVersion) {
           const pt = document.getElementById('persist-text');
           if (pt) pt.textContent = `Kalıcı Kayıt • ${info.appVersion}`;
@@ -114,6 +123,13 @@ function startLiveUpdateSync() {
         }
         window.location.reload();
         return;
+      } else if (info.dataVersion && info.dataVersion !== knownDataVersion) {
+        knownDataVersion = info.dataVersion;
+        // Another browser or mobile device updated data — pull live changes smoothly without interrupting typing
+        if (state.initialized && !isRemoteSyncInFlight && (Date.now() - lastLocalWriteAt) > 1200) {
+          isRemoteSyncInFlight = true;
+          loadState(false, true).finally(() => { isRemoteSyncInFlight = false; });
+        }
       }
       setTimeout(pollVersion, 2500);
     } catch {
@@ -125,12 +141,19 @@ function startLiveUpdateSync() {
 }
 
 async function apiFetch(url, options = {}) {
+  const method = (options.method || 'GET').toUpperCase();
+  if (method !== 'GET') lastLocalWriteAt = Date.now();
   const headers = {
     'Content-Type': 'application/json',
     'X-Smart-Token': SESSION_TOKEN,
     ...(options.headers || {})
   };
   const res = await fetch(url, { ...options, headers });
+  if (res.status === 401 && !updateReloadPending) {
+    updateReloadPending = true;
+    window.location.reload();
+    return { ok: false };
+  }
   if (res.status === 403 && !updateReloadPending) {
     // Session token rotated after a live server hot-update — reload smoothly to sync token
     try {
@@ -162,8 +185,18 @@ function markSaved(label) {
   if (mel) mel.textContent = text;
 }
 
-async function loadState(isInitial = false) {
+function isFocusedInside(selector) {
+  const ae = document.activeElement;
+  if (!ae) return false;
+  const tag = ae.tagName;
+  if (tag !== 'INPUT' && tag !== 'TEXTAREA' && tag !== 'SELECT') return false;
+  const root = document.querySelector(selector);
+  return !!(root && root.contains(ae));
+}
+
+async function loadState(isInitial = false, fromRemoteSync = false) {
   try {
+    const prevDraftSig = fromRemoteSync ? JSON.stringify(state.draft || {}) : '';
     const data = await apiFetch('/api/state');
     state.aiConfig = data.aiConfig;
     state.syncConfig = data.syncConfig;
@@ -177,18 +210,32 @@ async function loadState(isInitial = false) {
       state.initialized = true;
       const startView = state.draft.ActiveView || 'dashboard';
       applyViewDom(startView);
+    } else if (fromRemoteSync) {
+      const nextDraftSig = JSON.stringify(state.draft || {});
+      if (nextDraftSig !== prevDraftSig && !draftSaveTimer && !isFocusedInside('#view-add-product')) {
+        restoreDraftFromServer(state.draft);
+      }
     }
 
     renderSidebarStatus();
     renderDashboard();
     renderTargetMpChips();
-    renderInventory();
-    if (isInitial || state.activeView !== 'apis') {
+    const editingStockInput = document.activeElement && document.activeElement.id && document.activeElement.id.startsWith('stk-');
+    if (!fromRemoteSync || !editingStockInput) {
+      renderInventory();
+    }
+    if (isInitial || (state.activeView !== 'apis' && !isFocusedInside('#view-apis'))) {
       renderApiPanel();
     }
     renderLogs();
+    if (fromRemoteSync) {
+      const now = new Date().toLocaleTimeString('tr-TR', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+      markSaved(`Eşitlendi • ${now}`);
+    }
   } catch (err) {
-    toast('Sunucu bağlantısı alınamadı: ' + err.message, 'error');
+    if (!fromRemoteSync) {
+      toast('Sunucu bağlantısı alınamadı: ' + err.message, 'error');
+    }
   }
 }
 
@@ -329,6 +376,192 @@ function bindNavigation() {
 
   const mobileAccessBtn = document.getElementById('btn-mobile-access');
   if (mobileAccessBtn) mobileAccessBtn.addEventListener('click', openMobileAccessModal);
+
+  const mobileAccessTopBtn = document.getElementById('btn-mobile-access-top');
+  if (mobileAccessTopBtn) mobileAccessTopBtn.addEventListener('click', openMobileAccessModal);
+}
+
+function copyTextSafe(text, successMsg) {
+  const done = () => toast(successMsg || 'Kopyalandı.', 'success');
+  if (navigator.clipboard && window.isSecureContext) {
+    navigator.clipboard.writeText(text).then(done).catch(() => fallbackCopy(text, done));
+    return;
+  }
+  fallbackCopy(text, done);
+}
+
+function fallbackCopy(text, onDone) {
+  try {
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.setAttribute('readonly', '');
+    ta.style.position = 'fixed';
+    ta.style.top = '-9999px';
+    document.body.appendChild(ta);
+    ta.select();
+    document.execCommand('copy');
+    ta.remove();
+    if (onDone) onDone();
+  } catch {
+    toast('Kopyalanacak metin: ' + text, 'info');
+  }
+}
+
+function formatPinDisplay(pin) {
+  const s = String(pin || '').replace(/\D+/g, '');
+  if (s.length === 6) return s.slice(0, 3) + ' ' + s.slice(3);
+  return s || '------';
+}
+
+function buildRemoteModalBody(info) {
+  const urls = Array.isArray(info.mobileUrls) && info.mobileUrls.length > 0 ? info.mobileUrls : [info.localUrl];
+  const lanUrl = urls[0];
+  const tunnelActive = !!(info.tunnelActive && info.tunnelUrl);
+  const pin = info.accessPin || '';
+
+  const tunnelContent = tunnelActive
+    ? `
+      <div class="mobile-url-box">
+        <span class="mobile-url-code">${esc(info.tunnelUrl)}</span>
+      </div>
+      <div class="remote-pin-row">
+        <div class="remote-pin-meta">
+          <span class="remote-pin-label">6 Haneli Güvenlik PIN</span>
+          <span class="remote-pin-code" id="remote-pin-value">${esc(formatPinDisplay(pin))}</span>
+        </div>
+        <div class="remote-btn-row">
+          <button type="button" class="btn btn-soft btn-xs" id="btn-remote-copy-pin">PIN Kopyala</button>
+          <button type="button" class="btn btn-ghost btn-xs" id="btn-remote-regen-pin">PIN Yenile</button>
+        </div>
+      </div>
+      <div class="remote-btn-row">
+        <button type="button" class="btn btn-primary btn-sm" id="btn-remote-copy-url">Linki Kopyala</button>
+        <button type="button" class="btn btn-khaki-soft btn-sm" id="btn-remote-copy-both">Link + PIN Kopyala</button>
+        <button type="button" class="btn btn-danger-soft btn-sm" id="btn-remote-stop">Bağlantıyı Kapat</button>
+      </div>
+    `
+    : `
+      <div class="remote-pin-row">
+        <div class="remote-pin-meta">
+          <span class="remote-pin-label">Koruma PIN Kodu (Hazır)</span>
+          <span class="remote-pin-code" id="remote-pin-value">${esc(formatPinDisplay(pin))}</span>
+        </div>
+        <button type="button" class="btn btn-ghost btn-xs" id="btn-remote-regen-pin">PIN Yenile</button>
+      </div>
+      <div class="remote-btn-row">
+        <button type="button" class="btn btn-primary btn-sm" id="btn-remote-start">Her Yerden Güvenli Linki Başlat (HTTPS)</button>
+      </div>
+      <p class="remote-hint">Başlatıldığında ücretsiz şifreli bir Cloudflare HTTPS adresi açılır. Başka telefon, tablet, 4G/5G veya farklı bir bilgisayardan bu link ve 6 haneli PIN ile sorunsuz bağlanabilirsiniz.</p>
+    `;
+
+  return `
+    <div class="remote-section remote-section-highlight">
+      <div class="remote-section-head">
+        <span class="remote-section-title">Her Yerden Erişim (HTTPS • 4G/5G / Farklı Ağ / Başka Tarayıcı)</span>
+        <span class="badge ${tunnelActive ? 'badge-success' : 'badge-neutral'}">${tunnelActive ? 'Aktif • PIN Korumalı' : 'Kapalı'}</span>
+      </div>
+      <p class="remote-desc">Tüm cihazlarda ve tarayıcılarda yapılan değişiklikler <strong>otomatik ve canlı</strong> olarak birbirine eşitlenir.</p>
+      ${tunnelContent}
+    </div>
+
+    <div class="remote-section">
+      <div class="remote-section-head">
+        <span class="remote-section-title">Aynı Wi-Fi Yerel Ağ Adresi</span>
+        <span class="badge badge-khaki">Hızlı Yerel Ağ</span>
+      </div>
+      <div class="mobile-url-box">
+        <span class="mobile-url-code">${esc(lanUrl)}</span>
+        <button type="button" class="btn btn-soft btn-xs" id="btn-lan-copy">Kopyala</button>
+      </div>
+      <p class="remote-hint"><strong>Neden "localhost" başka cihazda açılmaz?</strong> <code>localhost</code> yalnızca bu bilgisayarı gösterir. Farklı cihaz veya mobil veri (4G/5G) için yukarıdaki <strong>Her Yerden Güvenli Link (HTTPS)</strong> bağlantısını kullanın.</p>
+    </div>
+  `;
+}
+
+function wireRemoteModalHandlers(info) {
+  const bodyEl = document.getElementById('smart-modal-body');
+  if (!bodyEl) return;
+
+  const urls = Array.isArray(info.mobileUrls) && info.mobileUrls.length > 0 ? info.mobileUrls : [info.localUrl];
+  const lanUrl = urls[0];
+
+  const rerender = async () => {
+    const fresh = await apiFetch('/api/network-info');
+    bodyEl.innerHTML = buildRemoteModalBody(fresh);
+    wireRemoteModalHandlers(fresh);
+  };
+
+  const startBtn = bodyEl.querySelector('#btn-remote-start');
+  if (startBtn) {
+    startBtn.addEventListener('click', async () => {
+      startBtn.disabled = true;
+      startBtn.textContent = 'Güvenli HTTPS bağlantısı kuruluyor...';
+      try {
+        await apiFetch('/api/remote/start', { method: 'POST', body: '{}' });
+        toast('Her yerden güvenli HTTPS linki oluşturuldu.', 'success');
+        await rerender();
+      } catch (err) {
+        toast('Uzaktan erişim başlatılamadı: ' + err.message, 'error');
+        startBtn.disabled = false;
+        startBtn.textContent = 'Her Yerden Güvenli Linki Başlat (HTTPS)';
+      }
+    });
+  }
+
+  const stopBtn = bodyEl.querySelector('#btn-remote-stop');
+  if (stopBtn) {
+    stopBtn.addEventListener('click', async () => {
+      stopBtn.disabled = true;
+      stopBtn.textContent = 'Kapatılıyor...';
+      try {
+        await apiFetch('/api/remote/stop', { method: 'POST', body: '{}' });
+        toast('Uzaktan HTTPS bağlantısı kapatıldı.', 'info');
+        await rerender();
+      } catch (err) {
+        toast('Kapatılamadı: ' + err.message, 'error');
+        stopBtn.disabled = false;
+        stopBtn.textContent = 'Bağlantıyı Kapat';
+      }
+    });
+  }
+
+  const regenBtn = bodyEl.querySelector('#btn-remote-regen-pin');
+  if (regenBtn) {
+    regenBtn.addEventListener('click', async () => {
+      regenBtn.disabled = true;
+      try {
+        const res = await apiFetch('/api/remote/regenerate-pin', { method: 'POST', body: '{}' });
+        toast('Yeni güvenlik PIN\'i oluşturuldu: ' + res.accessPin + ' (eski uzak oturumlar kapatıldı).', 'success');
+        await rerender();
+      } catch (err) {
+        toast('PIN yenilenemedi: ' + err.message, 'error');
+        regenBtn.disabled = false;
+      }
+    });
+  }
+
+  const copyUrlBtn = bodyEl.querySelector('#btn-remote-copy-url');
+  if (copyUrlBtn) {
+    copyUrlBtn.addEventListener('click', () => copyTextSafe(info.tunnelUrl, 'Her yerden erişim HTTPS linki kopyalandı.'));
+  }
+
+  const copyPinBtn = bodyEl.querySelector('#btn-remote-copy-pin');
+  if (copyPinBtn) {
+    copyPinBtn.addEventListener('click', () => copyTextSafe(info.accessPin, 'Güvenlik PIN kodu kopyalandı.'));
+  }
+
+  const copyBothBtn = bodyEl.querySelector('#btn-remote-copy-both');
+  if (copyBothBtn) {
+    copyBothBtn.addEventListener('click', () => {
+      const bundle = `Smart Panel: ${info.tunnelUrl}\nGüvenlik PIN: ${info.accessPin}`;
+      copyTextSafe(bundle, 'Bağlantı linki ve PIN kodu birlikte kopyalandı.');
+    });
+  }
+
+  const lanCopyBtn = bodyEl.querySelector('#btn-lan-copy');
+  if (lanCopyBtn) {
+    lanCopyBtn.addEventListener('click', () => copyTextSafe(lanUrl, 'Yerel Wi-Fi adresi kopyalandı.'));
+  }
 }
 
 function applyViewDom(viewName) {
@@ -344,39 +577,17 @@ function applyViewDom(viewName) {
 async function openMobileAccessModal() {
   try {
     const info = await apiFetch('/api/network-info');
-    const urls = Array.isArray(info.mobileUrls) && info.mobileUrls.length > 0 ? info.mobileUrls : [info.localUrl];
-    const primaryUrl = urls[0];
-    const extraHtml = urls.length > 1
-      ? `<p style="font-size:12px; color:var(--text-muted); margin-top:6px;">Diğer yerel ağ adresleri: ${urls.slice(1).map(u => esc(u)).join(', ')}</p>`
-      : '';
-
     openSmartModal({
-      eyebrow: 'Mobil Erişim',
-      title: 'Telefondan Smart\'a Bağlan',
+      eyebrow: 'Çoklu Cihaz & Uzaktan Erişim',
+      title: 'Başka Cihaz veya Tarayıcıdan Bağlan',
       tone: 'brand',
-      bodyHtml: `
-        <p>Telefonunuz bu bilgisayar ile <strong>aynı Wi-Fi ağındayken</strong> aşağıdaki adresi telefon tarayıcınızda açabilirsiniz.</p>
-        <div class="mobile-url-box">
-          <span class="mobile-url-code">${esc(primaryUrl)}</span>
-        </div>
-        ${extraHtml}
-        <p style="font-size:12.5px; color:var(--text-muted);">İpucu: Telefon tarayıcısında <strong>"Ana Ekrana Ekle"</strong> diyerek Smart'ı uygulama ikonu gibi kullanabilir, doğrudan telefon kamerasıyla ürün fotoğrafı yükleyebilirsiniz. Güvenlik gereği yalnızca kendi yerel Wi-Fi ağınızdan erişime açıktır.</p>
-      `,
+      wide: true,
+      bodyHtml: buildRemoteModalBody(info),
       actions: [
-        {
-          label: 'Adresi Kopyala',
-          cls: 'btn-khaki-soft',
-          onClick: () => {
-            if (navigator.clipboard) {
-              navigator.clipboard.writeText(primaryUrl).then(() => toast('Mobil bağlantı adresi kopyalandı.', 'success'));
-            } else {
-              toast('Adres: ' + primaryUrl, 'info');
-            }
-          }
-        },
-        { label: 'Tamam', cls: 'btn-primary', onClick: () => {} }
+        { label: 'Kapat', cls: 'btn-soft', onClick: () => {} }
       ]
     });
+    wireRemoteModalHandlers(info);
   } catch (err) {
     toast('Ağ bilgisi alınamadı: ' + err.message, 'error');
   }

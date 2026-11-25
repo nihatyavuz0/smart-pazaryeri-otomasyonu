@@ -23,6 +23,7 @@ del /f /q "%TMPEXE%" >nul 2>&1
     "%~dp0backend\ComplianceGuard.cs" ^
     "%~dp0backend\ImageHostService.cs" ^
     "%~dp0backend\Storage.cs" ^
+    "%~dp0backend\TunnelService.cs" ^
     "%~dp0backend\MarketplaceSchema.cs" ^
     "%~dp0backend\CompetitorAnalyzer.cs" ^
     "%~dp0backend\VisionAnalyzer.cs" ^
