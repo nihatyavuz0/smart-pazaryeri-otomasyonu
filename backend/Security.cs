@@ -396,6 +396,10 @@ namespace SmartMarketplace
                 clone.AiConfig.GeminiApiKey = stripCompletely ? "" : MaskSecret(clone.AiConfig.GeminiApiKey);
                 clone.AiConfig.OpenAiApiKey = stripCompletely ? "" : MaskSecret(clone.AiConfig.OpenAiApiKey);
             }
+            if (clone.SyncConfig != null && stripCompletely)
+            {
+                clone.SyncConfig.WebhookToken = "";
+            }
             if (clone.RemoteConfig != null && stripCompletely)
             {
                 clone.RemoteConfig.AccessPin = "";

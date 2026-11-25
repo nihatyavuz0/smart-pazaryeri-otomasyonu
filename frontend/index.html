@@ -324,9 +324,10 @@
         <header class="page-header">
           <div>
             <h1>Ürünler & Stok Takibi</h1>
-            <p class="subtitle">Tek bir yerden stok güncelleyin veya sipariş geldiğinde tüm pazaryerlerinin anlık eşitlenmesini izleyin.</p>
+            <p class="subtitle">Ürünleri tek merkezden güncelleyip tüm pazaryerlerine gönderin; herhangi bir kanalda sipariş gelince diğerlerinin stoğu otomatik düşsün.</p>
           </div>
           <div class="header-actions">
+            <button class="btn btn-khaki-soft" id="btn-pull-orders" title="Bağlı pazaryerlerinden yeni siparişleri çekip stokları anında düşer">Siparişleri Çek</button>
             <button class="btn btn-soft" id="btn-sync-all-top">Tüm Stokları Eşitle</button>
             <button class="btn btn-primary" data-nav="add-product">+ Ürün Ekle</button>
           </div>
@@ -341,6 +342,14 @@
               <label class="switch-label">
                 <input type="checkbox" id="sync-auto-toggle" />
                 <span>Otomatik Senkron</span>
+              </label>
+              <label class="switch-label" title="Bağlı pazaryerlerinden siparişleri otomatik çekip diğer kanallardan stok düşer">
+                <input type="checkbox" id="sync-auto-orders" checked />
+                <span>Sipariş Oto-Çek</span>
+              </label>
+              <label class="switch-label" title="İptal edilen siparişlerin stoğunu otomatik geri ekler">
+                <input type="checkbox" id="sync-restore-cancel" checked />
+                <span>İptalde Stok İade</span>
               </label>
               <select id="sync-interval" class="select">
                 <option value="1">Her 1 dk</option>
@@ -358,6 +367,17 @@
         </div>
 
         <div id="inventory-list" class="inventory-list"></div>
+
+        <div class="card" style="margin-top: 18px;">
+          <div class="card-head">
+            <div>
+              <h2>Son Senkronize Edilen Siparişler</h2>
+              <p class="subtitle" id="orders-last-pull-sub">Canlı API taraması veya anlık webhook ile işlenen siparişler ve çapraz stok düşümleri burada görünür.</p>
+            </div>
+            <button type="button" class="btn btn-soft btn-sm" id="btn-pull-orders-2">Şimdi Kontrol Et</button>
+          </div>
+          <div id="orders-history-list" class="orders-history-list"></div>
+        </div>
       </section>
 
       <!-- API CONNECTIONS VIEW -->
@@ -365,16 +385,40 @@
         <header class="page-header">
           <div>
             <h1>API Bağlantıları</h1>
-            <p class="subtitle">Pazaryeri satıcı panelinizden aldığınız API anahtarlarını girip bağlantıyı doğrulayın. Tüm anahtarlar Windows DPAPI ile şifrelenerek saklanır ve asla açık metin olarak dışa aktarılmaz.</p>
+            <p class="subtitle" id="api-security-subtitle">Pazaryeri satıcı panelinizden aldığınız API anahtarlarını girip bağlantıyı doğrulayın. Tüm anahtarlar şifrelenerek saklanır ve asla açık metin olarak dışa aktarılmaz.</p>
           </div>
         </header>
 
         <!-- Security Shield Status Strip -->
         <div class="security-strip">
-          <span class="badge badge-success">DPAPI Şifreleme Aktif</span>
+          <span class="badge badge-success" id="sec-badge-enc">AES-256 Şifreleme Aktif</span>
           <span class="badge badge-khaki">256-bit Oturum & CSRF Koruması</span>
           <span class="badge badge-info">Sıkı CSP & XSS Kalkanı</span>
-          <span class="badge badge-neutral">Yalnızca Yerel Erişim (127.0.0.1)</span>
+          <span class="badge badge-neutral" id="sec-badge-net">Kullanıcı Hesabı Korumalı</span>
+        </div>
+
+        <!-- Instant Order Webhook Integration Card -->
+        <div class="card" style="margin-bottom: 16px;">
+          <div class="card-head">
+            <div>
+              <h2>Anlık Sipariş Webhook Entegrasyonu (Çapraz Stok Koruması)</h2>
+              <p class="subtitle">Aşağıdaki adresi Trendyol / Hepsiburada / N11 satıcı panelindeki Webhook ayarına yapıştırırsanız, sipariş geldiği saniye diğer tüm pazaryerlerinden stok otomatik düşer.</p>
+            </div>
+            <button type="button" class="btn btn-soft btn-sm" id="btn-rotate-webhook">Anahtarı Yenile</button>
+          </div>
+          <div class="webhook-bar">
+            <select id="webhook-mp-select" class="select webhook-mp-select">
+              <option value="trendyol">Trendyol</option>
+              <option value="hepsiburada">Hepsiburada</option>
+              <option value="n11">N11</option>
+              <option value="idefix">İdefix</option>
+              <option value="pazarama">Pazarama</option>
+              <option value="pttavm">PttAVM</option>
+              <option value="amazon">Amazon TR</option>
+            </select>
+            <input type="text" id="webhook-url-display" class="input webhook-url-input" readonly />
+            <button type="button" class="btn btn-primary btn-sm" id="btn-copy-webhook">Kopyala</button>
+          </div>
         </div>
 
         <!-- AI Engine Settings Card -->

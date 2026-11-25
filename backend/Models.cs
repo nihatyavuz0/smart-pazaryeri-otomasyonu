@@ -12,6 +12,8 @@ namespace SmartMarketplace
         public DraftWorkspace Draft { get; set; }
         public List<MarketplaceConfig> Marketplaces { get; set; }
         public List<ProductRecord> Products { get; set; }
+        public List<SyncedOrderRecord> Orders { get; set; }
+        public List<string> ProcessedOrderKeys { get; set; }
         public List<ActivityLog> Logs { get; set; }
 
         public AppDatabase()
@@ -23,6 +25,8 @@ namespace SmartMarketplace
             Draft = new DraftWorkspace();
             Marketplaces = new List<MarketplaceConfig>();
             Products = new List<ProductRecord>();
+            Orders = new List<SyncedOrderRecord>();
+            ProcessedOrderKeys = new List<string>();
             Logs = new List<ActivityLog>();
         }
     }
@@ -152,17 +156,46 @@ namespace SmartMarketplace
     public class SyncSettings
     {
         public bool AutoSyncEnabled { get; set; }
+        public bool AutoPullOrders { get; set; }
+        public bool RestoreStockOnCancel { get; set; }
         public int IntervalMinutes { get; set; }
         public int LowStockThreshold { get; set; }
         public string LastSyncAt { get; set; }
+        public string LastOrderPullAt { get; set; }
+        public string WebhookToken { get; set; }
 
         public SyncSettings()
         {
             AutoSyncEnabled = true;
+            AutoPullOrders = true;
+            RestoreStockOnCancel = true;
             IntervalMinutes = 5;
             LowStockThreshold = 5;
             LastSyncAt = "";
+            LastOrderPullAt = "";
+            WebhookToken = "";
         }
+    }
+
+    public class SyncedOrderRecord
+    {
+        public string Id { get; set; }
+        public string OrderKey { get; set; }
+        public string OrderNumber { get; set; }
+        public string MarketplaceId { get; set; }
+        public string MarketplaceName { get; set; }
+        public string ProductId { get; set; }
+        public string ProductName { get; set; }
+        public string Sku { get; set; }
+        public string Barcode { get; set; }
+        public int Quantity { get; set; }
+        public string Status { get; set; }
+        public int StockBefore { get; set; }
+        public int StockAfter { get; set; }
+        public int SyncedChannels { get; set; }
+        public string Source { get; set; } // "Canlı API", "Webhook", "Simülasyon"
+        public string ProcessedAt { get; set; }
+        public bool Restored { get; set; }
     }
 
     public class MarketplaceConfig

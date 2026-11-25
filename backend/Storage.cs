@@ -548,6 +548,8 @@ namespace SmartMarketplace
         {
             if (db.AiConfig == null) db.AiConfig = new AiSettings();
             if (db.SyncConfig == null) db.SyncConfig = new SyncSettings();
+            if (string.IsNullOrWhiteSpace(db.SyncConfig.WebhookToken))
+                db.SyncConfig.WebhookToken = Security.GenerateSecureToken(24);
             if (db.RemoteConfig == null) db.RemoteConfig = new RemoteAccessSettings();
             if (string.IsNullOrWhiteSpace(db.RemoteConfig.AccessPin))
             {
@@ -585,6 +587,8 @@ namespace SmartMarketplace
             if (db.Draft.UploadedImages == null) db.Draft.UploadedImages = new List<string>();
             if (db.Draft.SelectedTargetMps == null) db.Draft.SelectedTargetMps = new List<string>();
             if (db.Products == null) db.Products = new List<ProductRecord>();
+            if (db.Orders == null) db.Orders = new List<SyncedOrderRecord>();
+            if (db.ProcessedOrderKeys == null) db.ProcessedOrderKeys = new List<string>();
             if (db.Logs == null) db.Logs = new List<ActivityLog>();
             EnsureAllMarketplaces(db);
         }

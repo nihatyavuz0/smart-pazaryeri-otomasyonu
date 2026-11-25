@@ -350,14 +350,21 @@ namespace SmartMarketplace
                             return;
                         }
 
-                        // 3. User Authentication Gate (persistent multi-device login + per-user workspace)
+                        // 3. Instant Order Webhook Receiver (before session cookie check; authenticated via per-user cryptographic webhook token)
+                        if (path.StartsWith("/api/webhooks/order/", StringComparison.OrdinalIgnoreCase) && req.Method == "POST")
+                        {
+                            HandleOrderWebhook(req, path, stream, remoteEp);
+                            return;
+                        }
+
+                        // 4. User Authentication Gate (persistent multi-device login + per-user workspace)
                         bool isHttps = Security.IsCloudMode
                             || Security.IsTunnelRequest(req.Headers)
                             || (req.Headers.ContainsKey("X-Forwarded-Proto") && string.Equals(req.Headers["X-Forwarded-Proto"], "https", StringComparison.OrdinalIgnoreCase));
 
                         if (path == "/api/auth/login" && req.Method == "POST")
                         {
-                            HandleUserLogin(req, stream, isHttps);
+                            HandleUserLogin(req, stream, isHttps, GetClientIp(req, remoteEp));
                             return;
                         }
 
@@ -366,12 +373,6 @@ namespace SmartMarketplace
                             string clearCookie = UserAuthService.BuildClearSessionCookie(isHttps);
                             string json = Storage.Serialize(new { ok = true });
                             WriteResponse(stream, 200, "application/json; charset=utf-8", Encoding.UTF8.GetBytes(json), clearCookie);
-                            return;
-                        }
-
-                        if (path == "/api/auth/pin" && req.Method == "POST")
-                        {
-                            HandlePinLogin(req, stream, isHttps);
                             return;
                         }
 
@@ -988,6 +989,7 @@ namespace SmartMarketplace
                         draft = safeView.Draft,
                         marketplaces = safeView.Marketplaces,
                         products = safeView.Products,
+                        orders = safeView.Orders ?? new List<SyncedOrderRecord>(),
                         logs = safeView.Logs,
                         security = new
                         {
@@ -1156,6 +1158,24 @@ namespace SmartMarketplace
                     product.UpdatedAt = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss");
                     if (string.IsNullOrWhiteSpace(product.CreatedAt)) product.CreatedAt = product.UpdatedAt;
 
+                    var existingIdx = db.Products.FindIndex(p => p.Id == product.Id);
+                    bool isExistingProduct = existingIdx >= 0;
+                    if (isExistingProduct)
+                    {
+                        var prevProd = db.Products[existingIdx];
+                        if (!string.IsNullOrWhiteSpace(prevProd.CreatedAt)) product.CreatedAt = prevProd.CreatedAt;
+                        // Preserve existing marketplace remote IDs & status so UpdateProductOnMarketplace uses PUT/update cleanly
+                        foreach (var kv in prevProd.Listings)
+                        {
+                            if (product.Listings.ContainsKey(kv.Key))
+                            {
+                                var nl = product.Listings[kv.Key];
+                                if (string.IsNullOrWhiteSpace(nl.RemoteId)) nl.RemoteId = kv.Value.RemoteId;
+                                if (nl.Status == "draft" && !string.IsNullOrWhiteSpace(kv.Value.Status)) nl.Status = kv.Value.Status;
+                            }
+                        }
+                    }
+
                     int successCount = 0;
                     int liveSuccessCount = 0;
                     int simulatedCount = 0;
@@ -1164,11 +1184,14 @@ namespace SmartMarketplace
 
                     foreach (var mp in db.Marketplaces)
                     {
+                        if (!mp.Enabled) continue;
                         if (!product.Listings.ContainsKey(mp.Id)) continue;
                         var listing = product.Listings[mp.Id];
                         if (!listing.Selected) continue;
 
-                        var result = MarketplaceConnectors.PublishProduct(mp, product, listing);
+                        var result = isExistingProduct
+                            ? MarketplaceConnectors.UpdateProductOnMarketplace(mp, product, listing)
+                            : MarketplaceConnectors.PublishProduct(mp, product, listing);
                         listing.LastSyncAt = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss");
                         listing.SyncedStock = product.Stock;
                         listing.StatusMessage = Security.RedactSensitiveText(result.Message);
@@ -1179,9 +1202,9 @@ namespace SmartMarketplace
                             if (result.IsSimulated) simulatedCount++;
                             else liveSuccessCount++;
                             listing.Status = result.IsSimulated ? "simulated" : "published";
-                            listing.RemoteId = result.RemoteId;
+                            if (!string.IsNullOrWhiteSpace(result.RemoteId)) listing.RemoteId = result.RemoteId;
                             Storage.AddLog(db, "publish", "success", mp.Name,
-                                "'" + product.BaseName + "' yayınlandı (" + (result.IsSimulated ? "Test Modu" : "Canlı API") + ").",
+                                "'" + product.BaseName + "' " + (isExistingProduct ? "güncellendi" : "yayınlandı") + " (" + (result.IsSimulated ? "Test Modu" : "Canlı API") + ").",
                                 result.RawDetails ?? result.Message);
                         }
                         else
@@ -1189,13 +1212,12 @@ namespace SmartMarketplace
                             failCount++;
                             listing.Status = "error";
                             Storage.AddLog(db, "publish", "error", mp.Name,
-                                "'" + product.BaseName + "' yayınlanamadı: " + result.Message,
+                                "'" + product.BaseName + "' " + (isExistingProduct ? "güncellenemedi" : "yayınlanamadı") + ": " + result.Message,
                                 result.RawDetails ?? "");
                         }
                         summaryList.Add(new { marketplace = mp.Name, marketplaceId = mp.Id, success = result.Success, simulated = result.IsSimulated, message = listing.StatusMessage, remoteId = result.RemoteId });
                     }
 
-                    var existingIdx = db.Products.FindIndex(p => p.Id == product.Id);
                     if (existingIdx >= 0) db.Products[existingIdx] = product;
                     else db.Products.Insert(0, product);
 
@@ -1213,12 +1235,158 @@ namespace SmartMarketplace
                     WriteJson(stream, 200, new
                     {
                         ok = true,
+                        updated = isExistingProduct,
                         product = product,
                         successCount = successCount,
                         liveSuccessCount = liveSuccessCount,
                         simulatedCount = simulatedCount,
                         failCount = failCount,
                         results = summaryList
+                    });
+                    return;
+                }
+
+                if (path == "/api/products/update" && method == "POST")
+                {
+                    var body = Storage.Deserialize<Dictionary<string, object>>(req.Body);
+                    string productId = body != null && body.ContainsKey("productId") ? Convert.ToString(body["productId"]) : "";
+                    var db = Storage.Load();
+                    var product = db.Products.Find(p => p.Id == productId);
+                    if (product == null)
+                    {
+                        WriteJson(stream, 404, new { ok = false, error = "Ürün bulunamadı." });
+                        return;
+                    }
+
+                    int oldStock = product.Stock;
+                    bool contentChanged = false;
+                    if (body.ContainsKey("baseName") && body["baseName"] != null)
+                    {
+                        string bn = Convert.ToString(body["baseName"]).Trim();
+                        if (!string.IsNullOrEmpty(bn) && bn != product.BaseName) { product.BaseName = bn; contentChanged = true; }
+                    }
+                    if (body.ContainsKey("brand") && body["brand"] != null)
+                    {
+                        string br = Convert.ToString(body["brand"]).Trim();
+                        if (!string.IsNullOrEmpty(br) && br != product.Brand) { product.Brand = br; contentChanged = true; }
+                    }
+                    if (body.ContainsKey("sku") && body["sku"] != null)
+                    {
+                        string sk = Convert.ToString(body["sku"]).Trim();
+                        if (!string.IsNullOrEmpty(sk)) product.Sku = sk;
+                    }
+                    if (body.ContainsKey("barcode") && body["barcode"] != null)
+                    {
+                        string bc = Convert.ToString(body["barcode"]).Trim();
+                        if (!string.IsNullOrEmpty(bc)) product.Barcode = bc;
+                    }
+                    decimal newPrice = product.Price;
+                    if (body.ContainsKey("price") && body["price"] != null)
+                    {
+                        decimal pVal;
+                        if (decimal.TryParse(Convert.ToString(body["price"]), System.Globalization.NumberStyles.Any, System.Globalization.CultureInfo.InvariantCulture, out pVal) && pVal > 0 && pVal <= 10000000)
+                        {
+                            newPrice = pVal;
+                            product.Price = pVal;
+                        }
+                    }
+                    if (body.ContainsKey("listPrice") && body["listPrice"] != null)
+                    {
+                        decimal lpVal;
+                        if (decimal.TryParse(Convert.ToString(body["listPrice"]), System.Globalization.NumberStyles.Any, System.Globalization.CultureInfo.InvariantCulture, out lpVal) && lpVal > 0 && lpVal <= 10000000)
+                            product.ListPrice = Math.Max(product.Price, lpVal);
+                    }
+                    if (body.ContainsKey("stock") && body["stock"] != null)
+                    {
+                        int stVal;
+                        if (int.TryParse(Convert.ToString(body["stock"]), out stVal))
+                            product.Stock = Math.Max(0, Math.Min(1000000, stVal));
+                    }
+                    if (body.ContainsKey("vatRate") && body["vatRate"] != null)
+                    {
+                        int vr;
+                        if (int.TryParse(Convert.ToString(body["vatRate"]), out vr) && (vr == 0 || vr == 1 || vr == 10 || vr == 20))
+                        {
+                            if (vr != product.VatRate) { product.VatRate = vr; contentChanged = true; }
+                        }
+                    }
+                    if (body.ContainsKey("desi") && body["desi"] != null)
+                    {
+                        double dv;
+                        if (double.TryParse(Convert.ToString(body["desi"]), System.Globalization.NumberStyles.Any, System.Globalization.CultureInfo.InvariantCulture, out dv) && dv > 0 && dv <= 500)
+                        {
+                            product.Desi = dv;
+                            contentChanged = true;
+                        }
+                    }
+                    string newDesc = body.ContainsKey("description") && body["description"] != null ? Convert.ToString(body["description"]).Trim() : null;
+                    bool applyTitleToAll = body.ContainsKey("applyTitleToAll") && Convert.ToBoolean(body["applyTitleToAll"]);
+
+                    foreach (var kv in product.Listings)
+                    {
+                        var l = kv.Value;
+                        if (l == null) continue;
+                        l.Price = newPrice;
+                        if (applyTitleToAll && !string.IsNullOrWhiteSpace(product.BaseName))
+                        {
+                            int maxL = l.MaxTitleLength > 0 ? l.MaxTitleLength : 100;
+                            l.Title = product.BaseName.Length > maxL ? product.BaseName.Substring(0, maxL).Trim() : product.BaseName;
+                            contentChanged = true;
+                        }
+                        if (!string.IsNullOrWhiteSpace(newDesc))
+                        {
+                            l.Description = newDesc;
+                            contentChanged = true;
+                        }
+                    }
+
+                    product.UpdatedAt = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss");
+                    int liveSuccess = 0, simSuccess = 0, failCount = 0;
+                    var results = new List<object>();
+
+                    foreach (var mp in db.Marketplaces)
+                    {
+                        if (!mp.Enabled || !product.Listings.ContainsKey(mp.Id)) continue;
+                        var listing = product.Listings[mp.Id];
+                        if (!listing.Selected && listing.Status == "draft") continue;
+
+                        var res = contentChanged
+                            ? MarketplaceConnectors.UpdateProductOnMarketplace(mp, product, listing)
+                            : MarketplaceConnectors.UpdateStockAndPrice(mp, product, listing, product.Stock, listing.Price);
+
+                        listing.LastSyncAt = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss");
+                        listing.StatusMessage = Security.RedactSensitiveText(res.Message);
+                        if (res.Success)
+                        {
+                            listing.SyncedStock = product.Stock;
+                            if (res.IsSimulated) simSuccess++; else liveSuccess++;
+                            if (listing.Status == "draft" || listing.Status == "error")
+                                listing.Status = res.IsSimulated ? "simulated" : "published";
+                            if (!string.IsNullOrWhiteSpace(res.RemoteId)) listing.RemoteId = res.RemoteId;
+                            Storage.AddLog(db, "publish", "success", mp.Name,
+                                "'" + product.BaseName + "' pazaryerinde güncellendi (Fiyat: " + product.Price.ToString("N2") + " TL, Stok: " + product.Stock + ").",
+                                res.RawDetails ?? res.Message);
+                        }
+                        else
+                        {
+                            failCount++;
+                            Storage.AddLog(db, "publish", "error", mp.Name,
+                                "'" + product.BaseName + "' güncellenemedi: " + res.Message,
+                                res.RawDetails ?? "");
+                        }
+                        results.Add(new { marketplace = mp.Name, marketplaceId = mp.Id, success = res.Success, simulated = res.IsSimulated, message = listing.StatusMessage, remoteId = res.RemoteId });
+                    }
+
+                    db.SyncConfig.LastSyncAt = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss");
+                    Storage.Save(db);
+                    WriteJson(stream, 200, new
+                    {
+                        ok = true,
+                        product = product,
+                        liveSuccessCount = liveSuccess,
+                        simulatedCount = simSuccess,
+                        failCount = failCount,
+                        results = results
                     });
                     return;
                 }
@@ -1384,10 +1552,15 @@ namespace SmartMarketplace
 
                     int oldStock = product.Stock;
                     product.Stock = newStock;
-                    if (newPrice.HasValue && newPrice.Value > 0 && newPrice.Value <= 10000000) product.Price = newPrice.Value;
+                    bool priceChanged = false;
+                    if (newPrice.HasValue && newPrice.Value > 0 && newPrice.Value <= 10000000)
+                    {
+                        product.Price = newPrice.Value;
+                        priceChanged = true;
+                    }
                     product.UpdatedAt = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss");
 
-                    int syncedChannels = SyncSingleProductAcrossChannels(db, product, source, oldStock);
+                    int syncedChannels = SyncSingleProductAcrossChannels(db, product, source, oldStock, null, priceChanged);
                     db.SyncConfig.LastSyncAt = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss");
                     Storage.Save(db);
 
@@ -1399,7 +1572,7 @@ namespace SmartMarketplace
                 {
                     var body = Storage.Deserialize<Dictionary<string, object>>(req.Body);
                     string productId = Convert.ToString(body["productId"]);
-                    string marketplaceId = body.ContainsKey("marketplaceId") ? Convert.ToString(body["marketplaceId"]) : "trendyol";
+                    string marketplaceId = body.ContainsKey("marketplaceId") && body["marketplaceId"] != null ? Convert.ToString(body["marketplaceId"]) : "trendyol";
                     int qty = body.ContainsKey("quantity") ? Math.Max(1, Math.Min(1000, Convert.ToInt32(body["quantity"]))) : 1;
 
                     var db = Storage.Load();
@@ -1410,20 +1583,61 @@ namespace SmartMarketplace
                         return;
                     }
 
-                    int oldStock = product.Stock;
-                    product.Stock = Math.Max(0, product.Stock - qty);
-                    product.UpdatedAt = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss");
+                    var simLine = new IncomingOrderLine
+                    {
+                        OrderNumber = "SIM-" + DateTime.Now.ToString("HHmmss") + "-" + Security.GenerateSecureToken(2).ToUpperInvariant(),
+                        MarketplaceId = marketplaceId,
+                        Barcode = product.Barcode,
+                        Sku = product.Sku,
+                        ProductName = product.BaseName,
+                        Quantity = qty,
+                        Status = "Test Siparişi"
+                    };
 
-                    string mpName = MarketplaceSchema.GetMarketplaceName(marketplaceId);
-                    Storage.AddLog(db, "stock", "info", mpName,
-                        mpName + " üzerinden " + qty + " adet sipariş geldi ('" + product.BaseName + "').",
-                        "Merkez stok " + oldStock + " → " + product.Stock + " olarak düşüldü; diğer pazaryerleri senkronize ediliyor.");
-
-                    int synced = SyncSingleProductAcrossChannels(db, product, mpName + " Sipariş Senkronu", oldStock);
+                    var rec = OrderSyncEngine.ApplyIncomingOrderLine(
+                        db,
+                        simLine,
+                        "Sipariş Simülasyonu",
+                        (d, p, src, oldS, srcMp) => SyncSingleProductAcrossChannels(d, p, src, oldS, srcMp, false)
+                    );
                     db.SyncConfig.LastSyncAt = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss");
                     Storage.Save(db);
 
-                    WriteJson(stream, 200, new { ok = true, product = product, syncedChannels = synced });
+                    WriteJson(stream, 200, new { ok = true, product = product, syncedChannels = rec != null ? rec.SyncedChannels : 0, order = rec });
+                    return;
+                }
+
+                if (path == "/api/orders/pull" && method == "POST")
+                {
+                    if (!Security.CheckRateLimit("orders_pull", 20))
+                    {
+                        WriteJson(stream, 429, new { ok = false, error = "Çok sık sipariş sorgusu. Lütfen birkaç saniye bekleyin." });
+                        return;
+                    }
+                    var db = Storage.Load();
+                    var summary = OrderSyncEngine.PullAndProcessAllOrders(
+                        db,
+                        (d, p, src, oldS, srcMp) => SyncSingleProductAcrossChannels(d, p, src, oldS, srcMp, false)
+                    );
+                    if (summary.NewOrdersProcessed > 0 || summary.CancelledRestored > 0)
+                    {
+                        db.SyncConfig.LastSyncAt = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss");
+                    }
+                    Storage.AddLog(db, "sync", "info", "Sipariş Motoru",
+                        "Canlı sipariş taraması tamamlandı: " + summary.ChannelsChecked + " canlı kanal, " + summary.NewOrdersProcessed + " yeni sipariş, " + summary.CancelledRestored + " iptal iadesi işlendi.",
+                        string.Join(" | ", summary.ChannelNotes));
+                    Storage.Save(db);
+                    WriteJson(stream, 200, new { ok = true, summary = summary, lastOrderPullAt = db.SyncConfig.LastOrderPullAt });
+                    return;
+                }
+
+                if (path == "/api/settings/webhook/rotate" && method == "POST")
+                {
+                    var db = Storage.Load();
+                    db.SyncConfig.WebhookToken = Security.GenerateSecureToken(24);
+                    Storage.AddLog(db, "system", "info", "Webhook", "Anlık sipariş webhook güvenlik anahtarı yenilendi.");
+                    Storage.Save(db);
+                    WriteJson(stream, 200, new { ok = true, webhookToken = db.SyncConfig.WebhookToken });
                     return;
                 }
 
@@ -1431,7 +1645,7 @@ namespace SmartMarketplace
                 {
                     var db = Storage.Load();
                     int count = RunFullStockSync(db, "Manuel Toplu Senkronizasyon");
-                    WriteJson(stream, 200, new { ok = true, syncedOperations = count, lastSyncAt = db.SyncConfig.LastSyncAt });
+                    WriteJson(stream, 200, new { ok = true, syncedOperations = count, lastSyncAt = db.SyncConfig.LastSyncAt, lastOrderPullAt = db.SyncConfig.LastOrderPullAt });
                     return;
                 }
 
@@ -1541,11 +1755,15 @@ namespace SmartMarketplace
                     var cfg = Storage.Deserialize<SyncSettings>(req.Body);
                     var db = Storage.Load();
                     db.SyncConfig.AutoSyncEnabled = cfg.AutoSyncEnabled;
+                    if (rawDict != null && rawDict.ContainsKey("AutoPullOrders"))
+                        db.SyncConfig.AutoPullOrders = cfg.AutoPullOrders;
+                    if (rawDict != null && rawDict.ContainsKey("RestoreStockOnCancel"))
+                        db.SyncConfig.RestoreStockOnCancel = cfg.RestoreStockOnCancel;
                     db.SyncConfig.IntervalMinutes = Math.Max(1, Math.Min(1440, cfg.IntervalMinutes));
                     db.SyncConfig.LowStockThreshold = Math.Max(0, Math.Min(100000, cfg.LowStockThreshold));
                     if (!silent)
                         Storage.AddLog(db, "sync", "info", "Stok Motoru",
-                            "Otomatik stok senkronizasyonu " + (cfg.AutoSyncEnabled ? ("açık (her " + db.SyncConfig.IntervalMinutes + " dk)") : "kapalı") + ".");
+                            "Otomatik stok & sipariş senkronizasyonu " + (cfg.AutoSyncEnabled ? ("açık (her " + db.SyncConfig.IntervalMinutes + " dk)") : "kapalı") + ".");
                     Storage.Save(db);
                     WriteJson(stream, 200, new { ok = true, syncConfig = db.SyncConfig });
                     return;
@@ -1570,16 +1788,31 @@ namespace SmartMarketplace
             }
         }
 
-        private static int SyncSingleProductAcrossChannels(AppDatabase db, ProductRecord product, string source, int oldStock)
+        private static int SyncSingleProductAcrossChannels(AppDatabase db, ProductRecord product, string source, int oldStock, string sourceMarketplaceId = null, bool updatePrices = false)
         {
             int synced = 0;
             foreach (var mp in db.Marketplaces)
             {
+                if (!mp.Enabled) continue;
                 if (!product.Listings.ContainsKey(mp.Id)) continue;
                 var listing = product.Listings[mp.Id];
                 if (!listing.Selected && listing.Status == "draft") continue;
 
-                listing.Price = product.Price;
+                // When an order originated live on sourceMarketplaceId, that marketplace already deducted its own stock.
+                // Record its aligned local SyncedStock and push the updated stock to ALL OTHER marketplaces!
+                if (!string.IsNullOrEmpty(sourceMarketplaceId)
+                    && string.Equals(mp.Id, sourceMarketplaceId, StringComparison.OrdinalIgnoreCase)
+                    && !mp.SimulationMode)
+                {
+                    listing.SyncedStock = product.Stock;
+                    listing.LastSyncAt = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss");
+                    listing.StatusMessage = mp.Name + " siparişi sonrası stok eşitlendi (" + product.Stock + " adet).";
+                    continue;
+                }
+
+                if (updatePrices || listing.Price <= 0)
+                    listing.Price = product.Price;
+
                 var res = MarketplaceConnectors.UpdateStockAndPrice(mp, product, listing, product.Stock, listing.Price);
                 listing.LastSyncAt = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss");
                 if (res.Success)
@@ -1604,6 +1837,17 @@ namespace SmartMarketplace
         private static int RunFullStockSync(AppDatabase db, string triggerName)
         {
             int ops = 0;
+            int ordersProcessed = 0;
+            if (db.SyncConfig != null && db.SyncConfig.AutoPullOrders)
+            {
+                var pullSummary = OrderSyncEngine.PullAndProcessAllOrders(
+                    db,
+                    (d, p, src, oldS, srcMp) => SyncSingleProductAcrossChannels(d, p, src, oldS, srcMp, false)
+                );
+                ordersProcessed = pullSummary.NewOrdersProcessed + pullSummary.CancelledRestored;
+                ops += pullSummary.StockSyncOperations;
+            }
+
             foreach (var p in db.Products)
             {
                 foreach (var mp in db.Marketplaces)
@@ -1611,7 +1855,8 @@ namespace SmartMarketplace
                     if (!mp.Enabled || !p.Listings.ContainsKey(mp.Id)) continue;
                     var listing = p.Listings[mp.Id];
                     if (!listing.Selected) continue;
-                    var r = MarketplaceConnectors.UpdateStockAndPrice(mp, p, listing, p.Stock, listing.Price);
+                    decimal effectivePrice = listing.Price > 0 ? listing.Price : p.Price;
+                    var r = MarketplaceConnectors.UpdateStockAndPrice(mp, p, listing, p.Stock, effectivePrice);
                     listing.LastSyncAt = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss");
                     if (r.Success)
                     {
@@ -1619,13 +1864,125 @@ namespace SmartMarketplace
                         listing.StatusMessage = Security.RedactSensitiveText(r.Message);
                         ops++;
                     }
+                    else
+                    {
+                        listing.StatusMessage = Security.RedactSensitiveText(r.Message);
+                    }
                 }
             }
             db.SyncConfig.LastSyncAt = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss");
             Storage.AddLog(db, "sync", "success", "Stok Motoru",
-                triggerName + " tamamlandı: " + db.Products.Count + " ürün, " + ops + " kanal güncellemesi eşitlendi.");
+                triggerName + " tamamlandı: " + ordersProcessed + " sipariş işlendi, " + db.Products.Count + " ürün / " + ops + " kanal güncellemesi eşitlendi.");
             Storage.Save(db);
             return ops;
+        }
+
+        private static string GetClientIp(SimpleHttpRequest req, IPEndPoint remoteEp)
+        {
+            if (req != null && req.Headers != null)
+            {
+                if (req.Headers.ContainsKey("X-Forwarded-For") && !string.IsNullOrWhiteSpace(req.Headers["X-Forwarded-For"]))
+                {
+                    string xff = req.Headers["X-Forwarded-For"].Split(',')[0].Trim();
+                    if (!string.IsNullOrEmpty(xff)) return xff;
+                }
+                if (req.Headers.ContainsKey("CF-Connecting-IP") && !string.IsNullOrWhiteSpace(req.Headers["CF-Connecting-IP"]))
+                    return req.Headers["CF-Connecting-IP"].Trim();
+            }
+            return remoteEp != null && remoteEp.Address != null ? remoteEp.Address.ToString() : "unknown";
+        }
+
+        private static Dictionary<string, string> ParseQueryString(string fullPath)
+        {
+            var dict = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            if (string.IsNullOrEmpty(fullPath)) return dict;
+            int q = fullPath.IndexOf('?');
+            if (q < 0 || q >= fullPath.Length - 1) return dict;
+            string qs = fullPath.Substring(q + 1);
+            foreach (var part in qs.Split('&'))
+            {
+                int eq = part.IndexOf('=');
+                if (eq > 0)
+                {
+                    string k = Uri.UnescapeDataString(part.Substring(0, eq).Replace("+", " "));
+                    string v = Uri.UnescapeDataString(part.Substring(eq + 1).Replace("+", " "));
+                    dict[k] = v;
+                }
+            }
+            return dict;
+        }
+
+        private static void HandleOrderWebhook(SimpleHttpRequest req, string cleanPath, NetworkStream stream, IPEndPoint remoteEp)
+        {
+            string clientIp = GetClientIp(req, remoteEp);
+            if (!Security.CheckRateLimit("webhook:" + clientIp, 60))
+            {
+                WriteJson(stream, 429, new { ok = false, error = "Çok sık webhook isteği." });
+                return;
+            }
+            string mpId = cleanPath.Substring("/api/webhooks/order/".Length).Trim('/').ToLowerInvariant();
+            if (string.IsNullOrWhiteSpace(mpId)) mpId = "trendyol";
+
+            var qs = ParseQueryString(req.Path);
+            string user = qs.ContainsKey("user") ? UserAuthService.NormalizeUsername(qs["user"]) : UserAuthService.DefaultAdminUsername;
+            string token = qs.ContainsKey("token") ? qs["token"].Trim() : "";
+            if (string.IsNullOrEmpty(token) && req.Headers.ContainsKey("X-Smart-Webhook-Token"))
+                token = (req.Headers["X-Smart-Webhook-Token"] ?? "").Trim();
+
+            if (string.IsNullOrEmpty(token) || UserAuthService.GetUser(user, false) == null)
+            {
+                WriteJson(stream, 401, new { ok = false, error = "Geçersiz webhook yetkilendirmesi." });
+                return;
+            }
+
+            Storage.CurrentUser = user;
+            try
+            {
+                var db = Storage.Load();
+                if (db.SyncConfig == null || string.IsNullOrWhiteSpace(db.SyncConfig.WebhookToken)
+                    || !Security.FixedTimeEquals(token, db.SyncConfig.WebhookToken))
+                {
+                    WriteJson(stream, 401, new { ok = false, error = "Webhook güvenlik anahtarı doğrulanamadı." });
+                    return;
+                }
+
+                var lines = OrderSyncEngine.ParseWebhookPayload(mpId, req.Body);
+                var processed = new List<SyncedOrderRecord>();
+                int syncedOps = 0;
+                foreach (var line in lines)
+                {
+                    var rec = OrderSyncEngine.ApplyIncomingOrderLine(
+                        db,
+                        line,
+                        "Anlık Webhook",
+                        (d, p, src, oldS, srcMp) => SyncSingleProductAcrossChannels(d, p, src, oldS, srcMp, false)
+                    );
+                    if (rec != null)
+                    {
+                        processed.Add(rec);
+                        syncedOps += rec.SyncedChannels;
+                    }
+                }
+                if (processed.Count > 0)
+                {
+                    db.SyncConfig.LastSyncAt = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss");
+                    db.SyncConfig.LastOrderPullAt = db.SyncConfig.LastSyncAt;
+                    Storage.Save(db);
+                }
+                WriteJson(stream, 200, new
+                {
+                    ok = true,
+                    marketplace = mpId,
+                    parsedLines = lines.Count,
+                    processedCount = processed.Count,
+                    syncedChannels = syncedOps,
+                    orders = processed
+                });
+            }
+            finally
+            {
+                Storage.CurrentUser = null;
+            }
         }
 
         private static void ServeIndexWithSessionToken(string indexPath, NetworkStream stream)
@@ -1639,9 +1996,9 @@ namespace SmartMarketplace
             WriteResponse(stream, 200, "text/html; charset=utf-8", Encoding.UTF8.GetBytes(html));
         }
 
-        private static void HandleUserLogin(SimpleHttpRequest req, NetworkStream stream, bool isHttps)
+        private static void HandleUserLogin(SimpleHttpRequest req, NetworkStream stream, bool isHttps, string clientIp)
         {
-            if (!Security.CheckRateLimit("user_login", 15))
+            if (!Security.CheckRateLimit("user_login:" + (clientIp ?? "unknown"), 15))
             {
                 WriteJson(stream, 429, new { ok = false, error = "Çok fazla giriş denemesi. Lütfen 1 dakika bekleyin." });
                 return;

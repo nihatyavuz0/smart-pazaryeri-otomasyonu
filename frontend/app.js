@@ -10,11 +10,13 @@ const SESSION_TOKEN = (() => {
 const state = {
   user: null,
   userProfile: null,
+  security: null,
   aiConfig: null,
   syncConfig: null,
   draft: null,
   marketplaces: [],
   products: [],
+  orders: [],
   logs: [],
   uploadedImages: [],
   uploadedFileNames: [],
@@ -203,14 +205,17 @@ async function loadState(isInitial = false, fromRemoteSync = false) {
     const data = await apiFetch('/api/state');
     state.user = data.user || null;
     state.userProfile = data.userProfile || null;
+    state.security = data.security || null;
     state.aiConfig = data.aiConfig;
     state.syncConfig = data.syncConfig;
     state.draft = data.draft || {};
     state.marketplaces = data.marketplaces || [];
     state.products = data.products || [];
+    state.orders = data.orders || [];
     state.logs = data.logs || [];
 
     applyUserProfileToUi();
+    updateSecurityBadges();
 
     if (isInitial || !state.initialized) {
       restoreDraftFromServer(state.draft);
@@ -352,6 +357,9 @@ function bindGlobalDelegatedActions() {
         break;
       case 'edit-product':
         editExistingProduct(id);
+        break;
+      case 'quick-update-product':
+        openQuickUpdateProductModal(id);
         break;
       case 'republish-live':
         republishProductLive(id, actionEl);
@@ -1053,6 +1061,12 @@ function renderGeneratedPreview(engineUsed) {
 
   renderListingTabs();
   renderActiveListingEditor();
+
+  const pubBtn = document.getElementById('btn-publish-draft');
+  if (pubBtn && state.currentDraft) {
+    const isEdit = state.products.some(pr => pr.Id === state.currentDraft.Id);
+    pubBtn.textContent = isEdit ? 'Değişiklikleri Kaydet & Pazaryerlerinde Güncelle' : 'Seçili Pazaryerlerinde Yayınla';
+  }
 }
 
 function renderListingTabs() {
@@ -1294,6 +1308,15 @@ async function runTrendyolCategoryMatch(preferredCategoryId, btnEl) {
 
 function saveCurrentListingEditsFromDom() {
   if (!state.currentDraft) return;
+  // Sync top-level product fields & uploaded images so edits never get dropped
+  if (Array.isArray(state.uploadedImages) && state.uploadedImages.length > 0) {
+    state.currentDraft.Images = [...state.uploadedImages];
+  }
+  const optBrand = (document.getElementById('opt-brand')?.value || '').trim();
+  if (optBrand) state.currentDraft.Brand = optBrand;
+  const optBarcode = (document.getElementById('opt-barcode')?.value || '').trim();
+  if (optBarcode) state.currentDraft.Barcode = optBarcode;
+
   const l = state.currentDraft.Listings[state.activeListingTab];
   if (!l) return;
   const titleEl = document.getElementById('ed-title');
@@ -1303,7 +1326,10 @@ function saveCurrentListingEditsFromDom() {
   l.Title = titleEl.value.trim();
   l.Description = document.getElementById('ed-desc').value;
   const pr = parseFloat(document.getElementById('ed-price').value);
-  if (!isNaN(pr) && pr > 0) l.Price = pr;
+  if (!isNaN(pr) && pr > 0) {
+    l.Price = pr;
+    state.currentDraft.Price = pr;
+  }
   const st = parseInt(document.getElementById('ed-stock').value, 10);
   if (!isNaN(st) && st >= 0) state.currentDraft.Stock = st;
   const sku = document.getElementById('ed-sku').value.trim();
@@ -1319,9 +1345,10 @@ async function publishCurrentDraft() {
   if (!state.currentDraft) return;
   saveCurrentListingEditsFromDom();
 
+  const isEdit = state.products.some(pr => pr.Id === state.currentDraft.Id);
   const btn = document.getElementById('btn-publish-draft');
   btn.disabled = true;
-  btn.textContent = 'Yayınlanıyor...';
+  btn.textContent = isEdit ? 'Pazaryerlerinde Güncelleniyor...' : 'Yayınlanıyor...';
 
   try {
     const res = await apiFetch('/api/products/publish', {
@@ -1331,8 +1358,9 @@ async function publishCurrentDraft() {
 
     const failedItems = (res.results || []).filter(r => !r.success);
     if (res.results && res.results.length > 0) {
+      const verb = res.updated ? 'Güncelleme' : 'Yayınlama';
       smartPublishSummaryModal({
-        title: failedItems.length === 0 ? 'Yayınlama Tamamlandı' : 'Yayınlama Özeti',
+        title: failedItems.length === 0 ? `${verb} Tamamlandı` : `${verb} Özeti`,
         subtitle: res.liveSuccessCount > 0
           ? `${res.liveSuccessCount} pazaryerine canlı gönderildi${res.simulatedCount > 0 ? `, ${res.simulatedCount} kanal Test Modunda işlendi` : ''}.`
           : (failedItems.length > 0 ? 'Bazı kanallarda dikkat edilmesi gereken bir durum oluştu.' : `${res.simulatedCount} kanal Test Modunda işlendi.`),
@@ -1368,10 +1396,12 @@ function bindInventoryEvents() {
   document.getElementById('inventory-search').addEventListener('input', renderInventory);
   document.getElementById('btn-sync-all-top').addEventListener('click', syncAllStocks);
   document.getElementById('btn-quick-sync').addEventListener('click', syncAllStocks);
+  document.getElementById('btn-pull-orders')?.addEventListener('click', pullLiveOrders);
+  document.getElementById('btn-pull-orders-2')?.addEventListener('click', pullLiveOrders);
   document.getElementById('btn-save-sync-cfg').addEventListener('click', () => saveSyncSettings(false));
 
-  ['sync-auto-toggle', 'sync-interval', 'sync-threshold'].forEach(id => {
-    document.getElementById(id).addEventListener('change', () => {
+  ['sync-auto-toggle', 'sync-auto-orders', 'sync-restore-cancel', 'sync-interval', 'sync-threshold'].forEach(id => {
+    document.getElementById(id)?.addEventListener('change', () => {
       clearTimeout(syncSaveTimer);
       syncSaveTimer = setTimeout(() => saveSyncSettings(true), 300);
     });
@@ -1381,9 +1411,14 @@ function bindInventoryEvents() {
 function renderInventory() {
   if (state.syncConfig) {
     document.getElementById('sync-auto-toggle').checked = !!state.syncConfig.AutoSyncEnabled;
+    const ao = document.getElementById('sync-auto-orders');
+    if (ao) ao.checked = state.syncConfig.AutoPullOrders !== false;
+    const rc = document.getElementById('sync-restore-cancel');
+    if (rc) rc.checked = state.syncConfig.RestoreStockOnCancel !== false;
     document.getElementById('sync-interval').value = String(state.syncConfig.IntervalMinutes || 5);
     document.getElementById('sync-threshold').value = state.syncConfig.LowStockThreshold || 5;
   }
+  renderOrdersHistory();
 
   const query = (document.getElementById('inventory-search').value || '').toLowerCase();
   const threshold = (state.syncConfig && state.syncConfig.LowStockThreshold) || 5;
@@ -1464,11 +1499,12 @@ function renderInventory() {
               <input type="number" id="stk-${pid}" value="${p.Stock}" min="0" />
               <button type="button" data-action="stock-step" data-id="${pid}" data-delta="1">+</button>
             </div>
-            <button type="button" class="btn btn-primary btn-sm" data-action="republish-live" data-id="${pid}">Canlı Yayınla</button>
+            <button type="button" class="btn btn-primary btn-sm" data-action="quick-update-product" data-id="${pid}">Güncelle</button>
             <button type="button" class="btn btn-soft btn-sm" data-action="save-stock" data-id="${pid}">Stok Eşitle</button>
+            <button type="button" class="btn btn-soft btn-sm" data-action="republish-live" data-id="${pid}">Canlı Yayınla</button>
             ${tyBatchBtn}
-            <button type="button" class="btn btn-soft btn-sm" data-action="edit-product" data-id="${pid}">Düzenle</button>
-            <button type="button" class="btn btn-khaki-soft btn-sm" data-action="simulate-order" data-id="${pid}" title="Trendyol'dan 1 sipariş geldiğini simüle edip tüm pazaryerlerinden düşer">Sipariş (-1)</button>
+            <button type="button" class="btn btn-soft btn-sm" data-action="edit-product" data-id="${pid}">Detaylı Düzenle</button>
+            <button type="button" class="btn btn-khaki-soft btn-sm" data-action="simulate-order" data-id="${pid}" title="Sipariş geldiğini simüle edip tüm diğer pazaryerlerinden stok düşer">Sipariş (-1)</button>
             <button type="button" class="btn btn-danger-soft btn-sm" data-action="delete-product" data-id="${pid}">Sil</button>
           </div>
         </div>
@@ -1630,6 +1666,8 @@ async function saveSyncSettings(silent = false) {
       body: JSON.stringify({
         silent,
         AutoSyncEnabled: document.getElementById('sync-auto-toggle').checked,
+        AutoPullOrders: document.getElementById('sync-auto-orders') ? document.getElementById('sync-auto-orders').checked : true,
+        RestoreStockOnCancel: document.getElementById('sync-restore-cancel') ? document.getElementById('sync-restore-cancel').checked : true,
         IntervalMinutes: parseInt(document.getElementById('sync-interval').value, 10) || 5,
         LowStockThreshold: parseInt(document.getElementById('sync-threshold').value, 10) || 5
       })
@@ -1637,10 +1675,204 @@ async function saveSyncSettings(silent = false) {
     state.syncConfig = res.syncConfig;
     renderSidebarStatus();
     markSaved();
-    if (!silent) toast('Stok senkronizasyon ayarları kaydedildi.', 'success');
+    if (!silent) toast('Stok & sipariş senkronizasyon ayarları kaydedildi.', 'success');
   } catch (err) {
     if (!silent) toast('Ayar kaydedilemedi: ' + err.message, 'error');
   }
+}
+
+async function pullLiveOrders() {
+  const btn1 = document.getElementById('btn-pull-orders');
+  const btn2 = document.getElementById('btn-pull-orders-2');
+  [btn1, btn2].forEach(b => { if (b) { b.disabled = true; b.dataset.orig = b.textContent; b.textContent = 'Taranıyor...'; } });
+  try {
+    const res = await apiFetch('/api/orders/pull', { method: 'POST', body: '{}' });
+    const s = res.summary || {};
+    markSaved();
+    await loadState(false);
+    if (s.ChannelsChecked === 0) {
+      toast('Canlı API modunda bağlı pazaryeri yok. API Bağlantıları ekranından anahtarlarınızı ekleyip Canlı Modu açtığınızda siparişler otomatik çekilir.', 'info');
+    } else {
+      toast(`${s.ChannelsChecked} canlı kanal tarandı: ${s.NewOrdersProcessed || 0} yeni sipariş işlendi, ${s.StockSyncOperations || 0} kanal stoğu güncellendi.`, 'success');
+    }
+  } catch (err) {
+    toast('Sipariş tarama hatası: ' + err.message, 'error');
+  } finally {
+    [btn1, btn2].forEach(b => { if (b) { b.disabled = false; b.textContent = b.dataset.orig || 'Siparişleri Çek'; } });
+  }
+}
+
+function renderOrdersHistory() {
+  const sub = document.getElementById('orders-last-pull-sub');
+  if (sub && state.syncConfig && state.syncConfig.LastOrderPullAt) {
+    sub.textContent = `Son sipariş kontrolü: ${state.syncConfig.LastOrderPullAt} • Herhangi bir pazaryerinde sipariş gelince diğer tüm kanallardan stok otomatik düşülür.`;
+  }
+  const el = document.getElementById('orders-history-list');
+  if (!el) return;
+  const orders = Array.isArray(state.orders) ? state.orders.slice(0, 25) : [];
+  if (orders.length === 0) {
+    el.innerHTML = '<div class="empty-state" style="padding:18px;">Henüz işlenen sipariş yok. Canlı API bağlı pazaryerlerinden gelen siparişler veya anlık webhook bildirimleri burada listelenir.</div>';
+    return;
+  }
+  el.innerHTML = orders.map(o => {
+    const srcCls = o.Source === 'Canlı API' ? 'badge-success' : (o.Source === 'Anlık Webhook' ? 'badge-info' : 'badge-khaki');
+    const stCls = o.Restored ? 'badge-warning' : 'badge-neutral';
+    return `
+      <div class="order-sync-row">
+        <div class="order-sync-left">
+          <div class="order-sync-title">
+            <span class="badge badge-khaki">${esc(o.MarketplaceName || o.MarketplaceId)}</span>
+            <strong>#${esc(o.OrderNumber)}</strong>
+            <span>${esc(o.ProductName)}</span>
+            <span class="badge ${srcCls}">${esc(o.Source || 'API')}</span>
+            <span class="badge ${stCls}">${esc(o.Status || 'İşlendi')}</span>
+          </div>
+          <div class="order-sync-meta">
+            Adet: <strong>${o.Quantity}</strong> • Merkez Stok: <strong>${o.StockBefore} → ${o.StockAfter}</strong> • Eşitlenen Kanal: <strong>${o.SyncedChannels}</strong> • Barkod: ${esc(o.Barcode || '-')} • ${esc(o.ProcessedAt || '')}
+          </div>
+        </div>
+      </div>
+    `;
+  }).join('');
+}
+
+function openQuickUpdateProductModal(id) {
+  const p = state.products.find(x => x.Id === id);
+  if (!p) return;
+
+  const bodyHtml = `
+    <p class="account-card-desc" style="margin-bottom:12px;">Burada yaptığınız değişiklikler hem Smart envanterinde kaydedilir hem de seçili tüm pazaryerlerine (fiyat, stok, başlık, KDV/Desi) <strong>anında gönderilir</strong>.</p>
+    <div class="account-form">
+      <label class="field-label">
+        <span>Ürün Adı</span>
+        <input type="text" id="qu-name" class="input" value="${escAttr(p.BaseName || '')}" />
+      </label>
+      <label class="login-remember" style="margin-top:-4px;">
+        <input type="checkbox" id="qu-apply-title" checked />
+        <span>Güncel ürün adını tüm pazaryeri başlıklarına da uygula</span>
+      </label>
+      <div class="account-form-row">
+        <label class="field-label">
+          <span>Satış Fiyatı (TL)</span>
+          <input type="number" step="0.01" min="0.01" id="qu-price" class="input" value="${escAttr(p.Price || 0)}" />
+        </label>
+        <label class="field-label">
+          <span>Liste Fiyatı (TL)</span>
+          <input type="number" step="0.01" min="0" id="qu-list-price" class="input" value="${escAttr(p.ListPrice || p.Price || 0)}" />
+        </label>
+      </div>
+      <div class="account-form-row">
+        <label class="field-label">
+          <span>Merkez Stok (Adet)</span>
+          <input type="number" min="0" id="qu-stock" class="input" value="${escAttr(p.Stock || 0)}" />
+        </label>
+        <label class="field-label">
+          <span>Marka</span>
+          <input type="text" id="qu-brand" class="input" value="${escAttr(p.Brand || '')}" />
+        </label>
+      </div>
+      <div class="account-form-row">
+        <label class="field-label">
+          <span>SKU / Stok Kodu</span>
+          <input type="text" id="qu-sku" class="input" value="${escAttr(p.Sku || '')}" />
+        </label>
+        <label class="field-label">
+          <span>Barkod</span>
+          <input type="text" id="qu-barcode" class="input" value="${escAttr(p.Barcode || '')}" />
+        </label>
+      </div>
+      <div class="account-form-row">
+        <label class="field-label">
+          <span>KDV Oranı (%)</span>
+          <select id="qu-vat" class="input">
+            <option value="20" ${p.VatRate === 20 ? 'selected' : ''}>%20</option>
+            <option value="10" ${p.VatRate === 10 ? 'selected' : ''}>%10</option>
+            <option value="1" ${p.VatRate === 1 ? 'selected' : ''}>%1</option>
+            <option value="0" ${p.VatRate === 0 ? 'selected' : ''}>%0</option>
+          </select>
+        </label>
+        <label class="field-label">
+          <span>Desi</span>
+          <input type="number" step="0.1" min="0.1" id="qu-desi" class="input" value="${escAttr(p.Desi || 1)}" />
+        </label>
+      </div>
+      <label class="field-label">
+        <span>Ortak Açıklama Güncelle (Boş bırakırsanız mevcut kanal açıklamaları korunur)</span>
+        <textarea id="qu-desc" class="input" rows="2" placeholder="Tüm pazaryerlerinin açıklamasını değiştirmek isterseniz yazın..."></textarea>
+      </label>
+    </div>
+  `;
+
+  openSmartModal({
+    eyebrow: 'Entegrasyon Ürün Güncelleme',
+    title: 'Ürünü Güncelle & Pazaryerlerine Gönder',
+    tone: 'brand',
+    wide: true,
+    bodyHtml,
+    actions: [
+      { label: 'Vazgeç', cls: 'btn-soft', onClick: () => {} },
+      {
+        label: 'Kaydet & Tüm Pazaryerlerini Güncelle',
+        cls: 'btn-primary',
+        onClick: async () => {
+          const payload = {
+            productId: id,
+            baseName: (document.getElementById('qu-name')?.value || '').trim(),
+            applyTitleToAll: !!(document.getElementById('qu-apply-title')?.checked),
+            price: parseFloat(document.getElementById('qu-price')?.value || p.Price),
+            listPrice: parseFloat(document.getElementById('qu-list-price')?.value || p.ListPrice || p.Price),
+            stock: parseInt(document.getElementById('qu-stock')?.value || p.Stock, 10),
+            brand: (document.getElementById('qu-brand')?.value || '').trim(),
+            sku: (document.getElementById('qu-sku')?.value || '').trim(),
+            barcode: (document.getElementById('qu-barcode')?.value || '').trim(),
+            vatRate: parseInt(document.getElementById('qu-vat')?.value || '20', 10),
+            desi: parseFloat(document.getElementById('qu-desi')?.value || '1'),
+            description: (document.getElementById('qu-desc')?.value || '').trim()
+          };
+          toast('Ürün güncelleniyor ve tüm bağlı pazaryerlerine gönderiliyor...', 'info');
+          try {
+            const res = await apiFetch('/api/products/update', {
+              method: 'POST',
+              body: JSON.stringify(payload)
+            });
+            markSaved();
+            await loadState(false);
+            if (res.results && res.results.length > 0) {
+              smartPublishSummaryModal({
+                title: res.failCount === 0 ? 'Pazaryeri Güncellemesi Tamamlandı' : 'Güncelleme Özeti',
+                subtitle: `${res.liveSuccessCount || 0} canlı kanal, ${res.simulatedCount || 0} test kanalı güncellendi.`,
+                results: res.results
+              });
+            } else {
+              toast('Ürün güncellendi.', 'success');
+            }
+          } catch (err) {
+            toast('Güncelleme hatası: ' + err.message, 'error');
+          }
+        }
+      }
+    ]
+  });
+}
+
+function updateSecurityBadges() {
+  const sec = state.security || {};
+  const encEl = document.getElementById('sec-badge-enc');
+  const netEl = document.getElementById('sec-badge-net');
+  if (encEl) encEl.textContent = sec.cloudMode ? 'AES-256-GCM Bulut Şifreleme Aktif' : 'DPAPI Şifreleme Aktif';
+  if (netEl) netEl.textContent = sec.cloudMode ? 'Vercel HTTPS + Kullanıcı Hesabı Korumalı' : 'Yerel Ağ + Kullanıcı Hesabı Korumalı';
+  renderWebhookUrl();
+}
+
+function renderWebhookUrl() {
+  const mpSel = document.getElementById('webhook-mp-select');
+  const urlInp = document.getElementById('webhook-url-display');
+  if (!mpSel || !urlInp) return;
+  const mp = mpSel.value || 'trendyol';
+  const uname = (state.user && state.user.username) ? state.user.username : 'nihatstark';
+  const tok = (state.syncConfig && state.syncConfig.WebhookToken) ? state.syncConfig.WebhookToken : '';
+  const origin = window.location.origin;
+  urlInp.value = `${origin}/api/webhooks/order/${encodeURIComponent(mp)}?user=${encodeURIComponent(uname)}&token=${encodeURIComponent(tok)}`;
 }
 
 // ---------------- API & AI Settings ----------------
@@ -1656,6 +1888,31 @@ function bindSettingsEvents() {
 
   document.getElementById('log-filter').addEventListener('change', renderLogs);
   document.getElementById('btn-clear-logs').addEventListener('click', clearLogs);
+
+  document.getElementById('webhook-mp-select')?.addEventListener('change', renderWebhookUrl);
+  document.getElementById('btn-copy-webhook')?.addEventListener('click', () => {
+    const val = document.getElementById('webhook-url-display')?.value || '';
+    if (val) copyTextSafe(val, 'Anlık sipariş Webhook adresi kopyalandı.');
+  });
+  document.getElementById('btn-rotate-webhook')?.addEventListener('click', async () => {
+    const ok = await smartConfirm({
+      eyebrow: 'Webhook Güvenliği',
+      title: 'Webhook anahtarı yenilensin mi?',
+      message: 'Yeni anahtar üretildiğinde eski Webhook URL geçersiz olur; pazaryeri panelinizde yeni adresi güncellemeniz gerekir.',
+      confirmText: 'Yenile',
+      cancelText: 'Vazgeç',
+      tone: 'danger'
+    });
+    if (!ok) return;
+    try {
+      const res = await apiFetch('/api/settings/webhook/rotate', { method: 'POST', body: '{}' });
+      if (state.syncConfig) state.syncConfig.WebhookToken = res.webhookToken;
+      renderWebhookUrl();
+      toast('Webhook güvenlik anahtarı yenilendi.', 'success');
+    } catch (err) {
+      toast('Yenilenemedi: ' + err.message, 'error');
+    }
+  });
 }
 
 function renderApiPanel() {

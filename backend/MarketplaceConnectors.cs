@@ -167,6 +167,106 @@ namespace SmartMarketplace
             }
         }
 
+        public static ConnectorResult UpdateProductOnMarketplace(MarketplaceConfig cfg, ProductRecord product, MarketplaceListing listing)
+        {
+            product.Brand = ComplianceGuard.CleanBrandName(product.Brand);
+            var compCheck = ComplianceGuard.SanitizeListing(listing.Title, listing.Description, listing.MaxTitleLength > 0 ? listing.MaxTitleLength : 100, product.Brand);
+            if (!string.IsNullOrWhiteSpace(compCheck.CleanedTitle)) listing.Title = compCheck.CleanedTitle;
+            if (!string.IsNullOrWhiteSpace(compCheck.CleanedDescription)) listing.Description = compCheck.CleanedDescription;
+
+            var missingReq = listing.Attributes.Where(a => a.Required && string.IsNullOrWhiteSpace(a.Value)).ToList();
+            if (missingReq.Count > 0)
+            {
+                return new ConnectorResult
+                {
+                    Success = false,
+                    Message = "Eksik zorunlu alanlar: " + string.Join(", ", missingReq.Select(x => x.Label))
+                };
+            }
+
+            if (cfg.SimulationMode)
+            {
+                string simId = string.IsNullOrWhiteSpace(listing.RemoteId)
+                    ? cfg.Id.ToUpperInvariant().Substring(0, Math.Min(3, cfg.Id.Length)) + "-" + DateTime.Now.ToString("HHmmss") + "-" + Guid.NewGuid().ToString("N").Substring(0, 4).ToUpperInvariant()
+                    : listing.RemoteId;
+                return new ConnectorResult
+                {
+                    Success = true,
+                    IsSimulated = true,
+                    RemoteId = simId,
+                    Message = cfg.Name + " (Test Modu) — Ürün bilgileri, fiyat (" + listing.Price.ToString("N2", new CultureInfo("tr-TR")) + " TL) ve stok (" + product.Stock + " adet) güncellendi.",
+                    RawDetails = "Simülasyon Güncelleme | ID: " + simId
+                };
+            }
+
+            try
+            {
+                ConnectorResult res;
+                switch (cfg.Id)
+                {
+                    case "trendyol":
+                        res = PublishTrendyol(cfg, product, listing);
+                        if (res.Success)
+                        {
+                            try
+                            {
+                                var invRes = SyncTrendyolStock(cfg, product, product.Stock, listing.Price > 0 ? listing.Price : product.Price);
+                                if (invRes.Success)
+                                    res.Message = (res.Message ?? "Trendyol güncellendi.") + " Fiyat & stok anında eşitlendi (" + product.Stock + " adet).";
+                            }
+                            catch { }
+                        }
+                        return res;
+                    case "hepsiburada":
+                        res = PublishHepsiburada(cfg, product, listing);
+                        if (res.Success)
+                        {
+                            try { SyncHepsiburadaStock(cfg, product, product.Stock, listing.Price > 0 ? listing.Price : product.Price); } catch { }
+                            res.Message = "Hepsiburada ürün bilgileri, fiyat ve stok canlı olarak güncellendi.";
+                        }
+                        return res;
+                    case "n11":
+                        res = UpdateOrPublishN11(cfg, product, listing);
+                        if (res.Success)
+                        {
+                            try { SyncN11Stock(cfg, product, product.Stock, listing.Price > 0 ? listing.Price : product.Price); } catch { }
+                        }
+                        return res;
+                    case "idefix":
+                        res = PublishIdefix(cfg, product, listing);
+                        if (res.Success)
+                        {
+                            try { SyncIdefixStock(cfg, product, product.Stock, listing.Price > 0 ? listing.Price : product.Price); } catch { }
+                            res.Message = "İdefix ürün bilgileri, fiyat ve stok canlı olarak güncellendi.";
+                        }
+                        return res;
+                    case "pazarama":
+                        res = PublishPazarama(cfg, product, listing);
+                        if (res.Success)
+                        {
+                            try { SyncPazaramaStock(cfg, product, product.Stock, listing.Price > 0 ? listing.Price : product.Price); } catch { }
+                            res.Message = "Pazarama ürün bilgileri, fiyat ve stok canlı olarak güncellendi.";
+                        }
+                        return res;
+                    case "pttavm":
+                        return PublishPttAvm(cfg, product, listing);
+                    case "amazon":
+                        return PublishAmazon(cfg, product, listing);
+                    default:
+                        return new ConnectorResult { Success = false, Message = "Desteklenmeyen pazaryeri." };
+                }
+            }
+            catch (WebException wex)
+            {
+                string err = ReadWebError(wex);
+                return new ConnectorResult { Success = false, Message = cfg.Name + " canlı güncelleme hatası: " + err, RawDetails = err };
+            }
+            catch (Exception ex)
+            {
+                return new ConnectorResult { Success = false, Message = cfg.Name + " canlı güncelleme hatası: " + ex.Message };
+            }
+        }
+
         public static ConnectorResult UpdateStockAndPrice(MarketplaceConfig cfg, ProductRecord product, MarketplaceListing listing, int newStock, decimal newPrice)
         {
             if (cfg.SimulationMode)
@@ -1176,6 +1276,55 @@ namespace SmartMarketplace
             return new ConnectorResult { Success = true, RemoteId = ExtractField(resp, "id", "N11-" + product.Sku), Message = "N11 CANLI API'ye gönderildi.", RawDetails = Trunc(resp, 300) };
         }
 
+        private static ConnectorResult UpdateOrPublishN11(MarketplaceConfig cfg, ProductRecord product, MarketplaceListing listing)
+        {
+            string imgErr;
+            var publicImages = ImageHostService.EnsurePublicImageUrls(product.Images, out imgErr);
+            var headers = new Dictionary<string, string> { { "appkey", GetCred(cfg, "appKey") }, { "appsecret", GetCred(cfg, "appSecret") } };
+            var payload = new Dictionary<string, object>
+            {
+                {
+                    "payload", new Dictionary<string, object>
+                    {
+                        { "integrator", "SmartOtomasyon" },
+                        {
+                            "skus", new[]
+                            {
+                                new Dictionary<string, object>
+                                {
+                                    { "title", listing.Title },
+                                    { "description", listing.Description },
+                                    { "categoryId", ParseIntSafe(listing.CategoryId, 1000001) },
+                                    { "currencyType", "TL" },
+                                    { "productMainId", product.Sku },
+                                    { "stockCode", product.Sku },
+                                    { "barcode", product.Barcode },
+                                    { "quantity", product.Stock },
+                                    { "salePrice", listing.Price },
+                                    { "listPrice", Math.Max(listing.Price, product.ListPrice) },
+                                    { "vatRate", product.VatRate },
+                                    { "preparingDay", 2 },
+                                    { "shipmentTemplate", string.IsNullOrWhiteSpace(GetCred(cfg, "shipmentTemplate")) ? "Standart Kargo" : GetCred(cfg, "shipmentTemplate") },
+                                    { "images", publicImages.Select((u, idx) => new Dictionary<string, object> { { "url", u }, { "order", idx + 1 } }).ToArray() }
+                                }
+                            }
+                        }
+                    }
+                }
+            };
+            string body = Storage.Serialize(payload);
+            try
+            {
+                string resp = HttpRequest("POST", "https://api.n11.com/ms/product/tasks/product-update", body, "application/json", headers);
+                return new ConnectorResult { Success = true, RemoteId = ExtractField(resp, "id", listing.RemoteId ?? ("N11-" + product.Sku)), Message = "N11 ürün bilgileri, fiyat ve stok canlı olarak güncellendi.", RawDetails = Trunc(resp, 300) };
+            }
+            catch
+            {
+                string resp = HttpRequest("POST", "https://api.n11.com/ms/product/tasks/product-create", body, "application/json", headers);
+                return new ConnectorResult { Success = true, RemoteId = ExtractField(resp, "id", "N11-" + product.Sku), Message = "N11 CANLI API'ye gönderildi.", RawDetails = Trunc(resp, 300) };
+            }
+        }
+
         private static ConnectorResult SyncN11Stock(MarketplaceConfig cfg, ProductRecord product, int newStock, decimal newPrice)
         {
             string url = "https://api.n11.com/ms/product/tasks/price-stock-update";
@@ -1280,7 +1429,7 @@ namespace SmartMarketplace
         }
 
         // ==================== PAZARAMA ====================
-        private static string GetPazaramaToken(MarketplaceConfig cfg)
+        public static string GetPazaramaToken(MarketplaceConfig cfg)
         {
             string cid = GetCred(cfg, "clientId");
             string csec = GetCred(cfg, "clientSecret");
@@ -1339,7 +1488,17 @@ namespace SmartMarketplace
             var headers = new Dictionary<string, string> { { "Authorization", "Bearer " + token } };
             var stockPayload = new Dictionary<string, object> { { "items", new[] { new Dictionary<string, object> { { "code", product.Barcode }, { "stockCount", newStock } } } } };
             string resp = HttpRequest("POST", "https://isortagimapi.pazarama.com/product/updateStock-v2", Storage.Serialize(stockPayload), "application/json", headers);
-            return new ConnectorResult { Success = true, Message = "Pazarama CANLI stok güncellendi (" + newStock + " adet).", RawDetails = Trunc(resp, 250) };
+            if (newPrice > 0)
+            {
+                try
+                {
+                    decimal listP = Math.Max(newPrice, product.ListPrice >= newPrice ? product.ListPrice : Math.Round(newPrice * 1.15m, 2));
+                    var pricePayload = new Dictionary<string, object> { { "items", new[] { new Dictionary<string, object> { { "code", product.Barcode }, { "listPrice", listP }, { "salePrice", newPrice } } } } };
+                    HttpRequest("POST", "https://isortagimapi.pazarama.com/product/updatePrice-v2", Storage.Serialize(pricePayload), "application/json", headers);
+                }
+                catch { }
+            }
+            return new ConnectorResult { Success = true, Message = "Pazarama CANLI stok & fiyat güncellendi (" + newStock + " adet).", RawDetails = Trunc(resp, 250) };
         }
 
         // ==================== PTTAVM ====================
@@ -1386,7 +1545,7 @@ namespace SmartMarketplace
             return new ConnectorResult { Success = true, Message = "PttAVM CANLI stok güncellendi (" + newStock + " adet).", RawDetails = Trunc(resp, 250) };
         }
 
-        private static string BuildPttSoapEnvelope(string user, string pass, string bodyXml)
+        public static string BuildPttSoapEnvelope(string user, string pass, string bodyXml)
         {
             return "<?xml version=\"1.0\" encoding=\"utf-8\"?>"
                 + "<soapenv:Envelope xmlns:soapenv=\"http://schemas.xmlsoap.org/soap/envelope/\" xmlns:tem=\"http://tempuri.org/\" xmlns:ptt=\"http://schemas.datacontract.org/2004/07/PttAvmServis\">"
@@ -1396,7 +1555,7 @@ namespace SmartMarketplace
         }
 
         // ==================== AMAZON TR (SP-API) ====================
-        private static string GetAmazonLwaToken(MarketplaceConfig cfg)
+        public static string GetAmazonLwaToken(MarketplaceConfig cfg)
         {
             string body = "grant_type=refresh_token&refresh_token=" + Uri.EscapeDataString(GetCred(cfg, "refreshToken"))
                 + "&client_id=" + Uri.EscapeDataString(GetCred(cfg, "lwaClientId"))
@@ -1449,27 +1608,35 @@ namespace SmartMarketplace
             string mpId = string.IsNullOrWhiteSpace(GetCred(cfg, "marketplaceId")) ? "A33AVAJ2PDY3EV" : GetCred(cfg, "marketplaceId");
             string url = "https://sellingpartnerapi-eu.amazon.com/listings/2021-08-01/items/" + Uri.EscapeDataString(sellerId) + "/" + Uri.EscapeDataString(product.Sku) + "?marketplaceIds=" + Uri.EscapeDataString(mpId);
             var headers = new Dictionary<string, string> { { "x-amz-access-token", token } };
+            var patches = new List<object>
+            {
+                new Dictionary<string, object>
+                {
+                    { "op", "replace" },
+                    { "path", "/attributes/fulfillment_availability" },
+                    { "value", new[] { new Dictionary<string, object> { { "fulfillment_channel_code", "DEFAULT" }, { "quantity", newStock } } } }
+                }
+            };
+            if (newPrice > 0)
+            {
+                patches.Add(new Dictionary<string, object>
+                {
+                    { "op", "replace" },
+                    { "path", "/attributes/purchasable_offer" },
+                    { "value", new[] { new Dictionary<string, object> { { "currency", "TRY" }, { "our_price", new[] { new Dictionary<string, object> { { "schedule", new[] { new Dictionary<string, object> { { "value_with_tax", newPrice } } } } } } } } } }
+                });
+            }
             var payload = new Dictionary<string, object>
             {
                 { "productType", "PRODUCT" },
-                {
-                    "patches", new[]
-                    {
-                        new Dictionary<string, object>
-                        {
-                            { "op", "replace" },
-                            { "path", "/attributes/fulfillment_availability" },
-                            { "value", new[] { new Dictionary<string, object> { { "fulfillment_channel_code", "DEFAULT" }, { "quantity", newStock } } } }
-                        }
-                    }
-                }
+                { "patches", patches.ToArray() }
             };
             string resp = HttpRequest("PATCH", url, Storage.Serialize(payload), "application/json", headers);
-            return new ConnectorResult { Success = true, Message = "Amazon TR CANLI stok güncellendi (" + newStock + " adet).", RawDetails = Trunc(resp, 250) };
+            return new ConnectorResult { Success = true, Message = "Amazon TR CANLI stok & fiyat güncellendi (" + newStock + " adet).", RawDetails = Trunc(resp, 250) };
         }
 
         // ==================== HTTP & TEXT HELPERS ====================
-        private static string HttpRequest(string method, string url, string body, string contentType, Dictionary<string, string> headers)
+        public static string HttpRequest(string method, string url, string body, string contentType, Dictionary<string, string> headers)
         {
             var req = (HttpWebRequest)WebRequest.Create(url);
             req.Method = method;
@@ -1539,7 +1706,7 @@ namespace SmartMarketplace
             return set;
         }
 
-        private static List<object> AsList(object obj)
+        public static List<object> AsList(object obj)
         {
             if (obj == null) return null;
             var already = obj as List<object>;
@@ -1551,14 +1718,14 @@ namespace SmartMarketplace
             return res;
         }
 
-        private static string GetCred(MarketplaceConfig cfg, string key)
+        public static string GetCred(MarketplaceConfig cfg, string key)
         {
             if (cfg.Credentials != null && cfg.Credentials.ContainsKey(key))
                 return (cfg.Credentials[key] ?? "").Trim();
             return "";
         }
 
-        private static string ToBase64(string text)
+        public static string ToBase64(string text)
         {
             return Convert.ToBase64String(Encoding.UTF8.GetBytes(text));
         }

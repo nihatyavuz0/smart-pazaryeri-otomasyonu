@@ -33,6 +33,7 @@ del /f /q "%TMPEXE%" >nul 2>&1
     "%~dp0backend\MarketplaceResearchEngine.cs" ^
     "%~dp0backend\AiContentEngine.cs" ^
     "%~dp0backend\MarketplaceConnectors.cs" ^
+    "%~dp0backend\OrderSyncEngine.cs" ^
     "%~dp0backend\Program.cs"
 
 if errorlevel 1 (
