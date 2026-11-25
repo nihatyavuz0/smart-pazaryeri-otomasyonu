@@ -29,7 +29,7 @@
     <div class="mobile-topbar-actions">
       <button type="button" class="btn btn-soft btn-xs" id="btn-mobile-access-top" aria-label="Cihaz Bağlantısı">Bağlan</button>
       <button type="button" class="btn btn-khaki-soft btn-xs" id="btn-mobile-sync" aria-label="Stokları Eşitle">Eşitle</button>
-      <button type="button" class="mobile-user-btn av-khaki" id="btn-mobile-account" data-nav="account" aria-label="Hesabım ve Özelleştirme"><span id="mobile-user-initials">NS</span></button>
+      <button type="button" class="mobile-user-btn av-khaki" id="btn-mobile-account" data-nav="account" aria-label="Profil ve Hesap Ayarları"><span id="mobile-user-initials">NS</span><img class="user-avatar-img hidden" id="mobile-user-avatar-img" alt="" /></button>
     </div>
   </header>
 
@@ -94,15 +94,18 @@
 
       <div class="sidebar-footer">
         <div class="user-mini-card" id="sidebar-user-card">
-          <div class="user-mini-top">
-            <div class="user-avatar av-khaki" id="sidebar-user-avatar">NS</div>
+          <div class="user-mini-top user-mini-clickable" data-nav="account" title="Profil & Hesap Ayarları">
+            <div class="user-avatar av-khaki" id="sidebar-user-avatar">
+              <span id="sidebar-user-initials">NS</span>
+              <img class="user-avatar-img hidden" id="sidebar-user-avatar-img" alt="" />
+            </div>
             <div class="user-mini-info">
               <div class="user-mini-name" id="sidebar-user-name">Nihat Stark</div>
               <div class="user-mini-handle" id="sidebar-user-handle">@nihatstark</div>
             </div>
           </div>
           <div class="user-mini-actions">
-            <button type="button" class="btn btn-soft btn-xs" data-nav="account">Özelleştir</button>
+            <button type="button" class="btn btn-soft btn-xs" data-nav="account">Profil</button>
             <button type="button" class="btn btn-ghost btn-xs" id="btn-sidebar-logout">Çıkış</button>
           </div>
         </div>
@@ -496,79 +499,166 @@
       <section class="view" id="view-account">
         <header class="page-header">
           <div>
-            <h1>Hesabım & Özelleştirme</h1>
-            <p class="subtitle">Profiliniz, tema tercihleriniz, ürünleriniz ve tüm pazaryeri bağlantılarınız hesabınıza bağlı olarak her cihazda aynı kalır.</p>
+            <h1>Profil & Hesap Ayarları</h1>
+            <p class="subtitle">Kişisel profiliniz, fotoğrafınız ve çalışma alanı tercihleriniz tüm cihazlarınızda senkronize olarak saklanır.</p>
           </div>
           <button type="button" class="btn btn-soft" id="btn-account-logout">Çıkış Yap</button>
         </header>
 
-        <div class="grid-2 account-grid">
-          <!-- Card 1: Profile & Store Identity -->
-          <div class="card">
-            <div class="card-head">
-              <h2>Profil & Panel Kimliği</h2>
-              <span class="badge badge-khaki" id="acc-role-badge">Yönetici</span>
+        <!-- Executive Quiet-Luxury Profile Banner -->
+        <div class="profile-banner-card">
+          <div class="profile-banner-left">
+            <div class="profile-photo-wrap">
+              <button type="button" class="profile-photo-frame av-khaki" id="acc-avatar-preview" title="Profil fotoğrafını değiştir">
+                <span class="profile-photo-initials" id="acc-avatar-initials">NS</span>
+                <img class="profile-photo-img hidden" id="acc-avatar-img" alt="Profil fotoğrafı" />
+                <span class="profile-photo-overlay" aria-hidden="true">
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg>
+                </span>
+              </button>
+              <input type="file" id="acc-avatar-file" accept="image/jpeg,image/png,image/webp" hidden />
             </div>
 
-            <div class="account-avatar-hero">
-              <div class="user-avatar user-avatar-lg av-khaki" id="acc-avatar-preview">NS</div>
-              <div class="account-avatar-meta">
-                <div class="account-avatar-title" id="acc-hero-name">Nihat Stark</div>
-                <div class="account-avatar-sub" id="acc-hero-sub">@nihatstark • Kalıcı Bulut Hesabı</div>
-                <div class="swatch-row" id="acc-swatch-row" aria-label="Avatar rengi">
-                  <button type="button" class="swatch-btn av-khaki active" data-avatar-color="khaki" title="Haki"></button>
-                  <button type="button" class="swatch-btn av-slate" data-avatar-color="slate" title="Lacivert Arduvaz"></button>
-                  <button type="button" class="swatch-btn av-forest" data-avatar-color="forest" title="Orman Yeşili"></button>
-                  <button type="button" class="swatch-btn av-amber" data-avatar-color="amber" title="Kehribar"></button>
-                  <button type="button" class="swatch-btn av-plum" data-avatar-color="plum" title="Erik"></button>
-                  <button type="button" class="swatch-btn av-terracotta" data-avatar-color="terracotta" title="Terracotta"></button>
+            <div class="profile-identity-meta">
+              <div class="profile-identity-top">
+                <h2 class="profile-identity-name" id="acc-hero-name">Nihat Stark</h2>
+                <span class="profile-role-pill" id="acc-role-badge">Yönetici</span>
+              </div>
+              <div class="profile-identity-role" id="acc-hero-job">Mağaza Yöneticisi • Pazaryeri Otomasyonu</div>
+              <div class="profile-identity-sub" id="acc-hero-sub">@nihatstark • Kalıcı Bulut Hesabı</div>
+              <p class="profile-identity-bio hidden" id="acc-hero-bio"></p>
+              <div class="profile-photo-actions">
+                <button type="button" class="btn btn-soft btn-xs" id="btn-upload-avatar">Fotoğraf Yükle</button>
+                <button type="button" class="btn btn-ghost btn-xs hidden" id="btn-remove-avatar">Fotoğrafı Kaldır</button>
+              </div>
+            </div>
+          </div>
+
+          <div class="profile-stats-strip">
+            <div class="profile-stat">
+              <span class="profile-stat-val" id="acc-stat-products">0</span>
+              <span class="profile-stat-lbl">Kayıtlı Ürün</span>
+            </div>
+            <div class="profile-stat">
+              <span class="profile-stat-val" id="acc-stat-channels">0/7</span>
+              <span class="profile-stat-lbl">Aktif Kanal</span>
+            </div>
+            <div class="profile-stat">
+              <span class="profile-stat-val profile-stat-val-sm" id="acc-stat-last-login">Aktif</span>
+              <span class="profile-stat-lbl">Son Giriş</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- Calm Segmented Profile Sub-Navigation -->
+        <div class="profile-tabs" role="tablist" aria-label="Profil bölümleri">
+          <button type="button" class="profile-tab active" data-profile-tab="identity" role="tab" aria-selected="true">Profil & Kimlik</button>
+          <button type="button" class="profile-tab" data-profile-tab="appearance" role="tab" aria-selected="false">Görünüm & Tema</button>
+          <button type="button" class="profile-tab" data-profile-tab="security" role="tab" aria-selected="false">Güvenlik & Oturum</button>
+          <button type="button" class="profile-tab hidden" id="tab-admin-users" data-profile-tab="users" role="tab" aria-selected="false">Kullanıcılar</button>
+        </div>
+
+        <!-- TAB 1: Profile & Identity -->
+        <div class="profile-tab-panel active" id="profile-panel-identity">
+          <div class="profile-two-col">
+            <div class="card">
+              <div class="card-head">
+                <div>
+                  <h2>Kişisel & Mağaza Bilgileri</h2>
+                  <p class="subtitle">Adınız, ünvanınız ve panel başlıklarınız tüm cihazlarınızda anında güncellenir.</p>
+                </div>
+              </div>
+
+              <form id="account-profile-form" class="account-form">
+                <div class="account-form-row">
+                  <label class="field-label">
+                    <span>Ad Soyad / Görünen Ad</span>
+                    <input type="text" id="acc-display-name" class="input" maxlength="60" placeholder="Örn: Nihat Stark" />
+                  </label>
+                  <label class="field-label">
+                    <span>Ünvan / Görev</span>
+                    <input type="text" id="acc-job-title" class="input" maxlength="60" placeholder="Örn: Kurucu, Mağaza Yöneticisi" />
+                  </label>
+                </div>
+                <div class="account-form-row">
+                  <label class="field-label">
+                    <span>Panel Üst Başlığı</span>
+                    <input type="text" id="acc-panel-title" class="input" maxlength="32" placeholder="Smart" />
+                  </label>
+                  <label class="field-label">
+                    <span>Mağaza / Alt Başlık</span>
+                    <input type="text" id="acc-store-name" class="input" maxlength="60" placeholder="Pazaryeri Otomasyonu" />
+                  </label>
+                </div>
+                <label class="field-label">
+                  <span>İletişim E-postası <span class="opt">(opsiyonel)</span></span>
+                  <input type="email" id="acc-email" class="input" maxlength="100" placeholder="ornek@alanadi.com" />
+                </label>
+                <label class="field-label">
+                  <span>Kısa Biyografi / Mağaza Notu <span class="opt">(opsiyonel)</span></span>
+                  <textarea id="acc-bio" class="input" rows="3" maxlength="240" placeholder="Profil kartınızda görünecek kısa ve sade bir açıklama..."></textarea>
+                </label>
+                <div class="account-form-actions">
+                  <button type="submit" class="btn btn-primary" id="btn-save-profile">Değişiklikleri Kaydet</button>
+                </div>
+              </form>
+            </div>
+
+            <div class="card">
+              <div class="card-head">
+                <div>
+                  <h2>Profil Görseli & Monogram</h2>
+                  <p class="subtitle">Kare kırpılmış yüksek kaliteli fotoğraf yükleyebilir veya sade monogram kullanabilirsiniz.</p>
+                </div>
+              </div>
+
+              <div class="avatar-drop-panel" id="acc-avatar-dropzone">
+                <div class="avatar-drop-icon">
+                  <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+                </div>
+                <div class="avatar-drop-copy">
+                  <strong>Profil fotoğrafı seçin veya buraya bırakın</strong>
+                  <span>JPG, PNG veya WEBP • Otomatik merkezden kare kırpılır ve bulutta kalıcı saklanır</span>
+                </div>
+                <button type="button" class="btn btn-soft btn-sm" id="btn-upload-avatar-2">Dosya Seç</button>
+              </div>
+
+              <div class="profile-divider"></div>
+
+              <div class="account-form">
+                <label class="field-label">
+                  <span>Fotoğraf Yokken Monogram (2–3 Harf)</span>
+                  <input type="text" id="acc-initials" class="input" maxlength="3" placeholder="NS" />
+                </label>
+                <div class="field-label">
+                  <span>Monogram Tonu</span>
+                  <div class="swatch-row" id="acc-swatch-row" aria-label="Avatar rengi">
+                    <button type="button" class="swatch-btn av-khaki active" data-avatar-color="khaki" title="Haki"></button>
+                    <button type="button" class="swatch-btn av-slate" data-avatar-color="slate" title="Lacivert Arduvaz"></button>
+                    <button type="button" class="swatch-btn av-forest" data-avatar-color="forest" title="Orman Yeşili"></button>
+                    <button type="button" class="swatch-btn av-amber" data-avatar-color="amber" title="Kehribar"></button>
+                    <button type="button" class="swatch-btn av-plum" data-avatar-color="plum" title="Erik"></button>
+                    <button type="button" class="swatch-btn av-terracotta" data-avatar-color="terracotta" title="Terracotta"></button>
+                  </div>
+                </div>
+                <div class="account-form-actions">
+                  <button type="button" class="btn btn-soft btn-sm" id="btn-save-monogram">Monogramı Kaydet</button>
                 </div>
               </div>
             </div>
-
-            <form id="account-profile-form" class="account-form">
-              <div class="account-form-row">
-                <label class="field-label">
-                  <span>Görünen Ad</span>
-                  <input type="text" id="acc-display-name" class="input" maxlength="60" placeholder="Örn: Nihat Stark" />
-                </label>
-                <label class="field-label">
-                  <span>Monogram (2-3 Harf)</span>
-                  <input type="text" id="acc-initials" class="input" maxlength="3" placeholder="NS" />
-                </label>
-              </div>
-              <div class="account-form-row">
-                <label class="field-label">
-                  <span>Panel Başlığı</span>
-                  <input type="text" id="acc-panel-title" class="input" maxlength="32" placeholder="Smart" />
-                </label>
-                <label class="field-label">
-                  <span>Mağaza / Alt Başlık</span>
-                  <input type="text" id="acc-store-name" class="input" maxlength="60" placeholder="Pazaryeri Otomasyonu" />
-                </label>
-              </div>
-              <label class="field-label">
-                <span>E-posta (İsteğe Bağlı)</span>
-                <input type="email" id="acc-email" class="input" maxlength="100" placeholder="ornek@alanadi.com" />
-              </label>
-              <label class="field-label">
-                <span>Kısa Not / Mağaza Açıklaması</span>
-                <textarea id="acc-bio" class="input" rows="2" maxlength="240" placeholder="Hesabınıza özel hatırlatma veya mağaza notu..."></textarea>
-              </label>
-              <div class="account-form-actions">
-                <button type="submit" class="btn btn-primary" id="btn-save-profile">Profili Kaydet</button>
-              </div>
-            </form>
           </div>
+        </div>
 
-          <!-- Card 2: Theme & Interface Customization -->
+        <!-- TAB 2: Appearance & Preferences -->
+        <div class="profile-tab-panel" id="profile-panel-appearance">
           <div class="card">
             <div class="card-head">
-              <h2>Arayüz & Tema Özelleştirme</h2>
+              <div>
+                <h2>Arayüz & Tema Özelleştirme</h2>
+                <p class="subtitle">Seçtiğiniz tema, görünüm yoğunluğu ve açılış sayfası hesabınızla tüm cihazlara otomatik yansır.</p>
+              </div>
               <span class="badge badge-success">Tüm Cihazlarda Senkron</span>
             </div>
-
-            <p class="account-card-desc">Seçtiğiniz tema, görünüm yoğunluğu ve açılış sayfası hesabınıza kaydedilir; başka bir bilgisayardan girdiğinizde paneliniz aynı şekilde açılır.</p>
 
             <div class="field-label">
               <span>Renk Teması</span>
@@ -621,7 +711,7 @@
               </div>
             </div>
 
-            <div class="account-form-row" style="margin-top:14px;">
+            <div class="account-form-row" style="margin-top:18px;">
               <label class="field-label">
                 <span>Görünüm Yoğunluğu</span>
                 <select id="acc-density" class="input">
@@ -640,65 +730,89 @@
               </label>
             </div>
 
-            <div class="account-form-actions" style="margin-top:14px;">
-              <button type="button" class="btn btn-primary" id="btn-save-appearance">Görünümü Kaydet</button>
+            <div class="account-form-actions" style="margin-top:16px;">
+              <button type="button" class="btn btn-primary" id="btn-save-appearance">Görünüm Tercihlerini Kaydet</button>
             </div>
           </div>
+        </div>
 
-          <!-- Card 3: Security & Password -->
-          <div class="card">
-            <div class="card-head">
-              <h2>Hesap Güvenliği & Oturum</h2>
+        <!-- TAB 3: Security & Session -->
+        <div class="profile-tab-panel" id="profile-panel-security">
+          <div class="profile-two-col">
+            <div class="card">
+              <div class="card-head">
+                <div>
+                  <h2>Şifre Güncelleme</h2>
+                  <p class="subtitle">Şifreniz PBKDF2-SHA256 ile özetlenir; değiştirildiğinde diğer cihazların oturumu otomatik kapanır.</p>
+                </div>
+              </div>
+
+              <form id="account-password-form" class="account-form">
+                <label class="field-label">
+                  <span>Mevcut Şifre</span>
+                  <input type="password" id="acc-cur-pwd" class="input" autocomplete="current-password" placeholder="Mevcut şifreniz" required />
+                </label>
+                <div class="account-form-row">
+                  <label class="field-label">
+                    <span>Yeni Şifre</span>
+                    <input type="password" id="acc-new-pwd" class="input" autocomplete="new-password" minlength="6" placeholder="En az 6 karakter" required />
+                  </label>
+                  <label class="field-label">
+                    <span>Yeni Şifre (Tekrar)</span>
+                    <input type="password" id="acc-new-pwd2" class="input" autocomplete="new-password" minlength="6" placeholder="Tekrar girin" required />
+                  </label>
+                </div>
+                <div class="account-form-actions">
+                  <button type="submit" class="btn btn-primary" id="btn-change-password">Şifreyi Güncelle</button>
+                </div>
+              </form>
             </div>
 
-            <div class="account-meta-box">
-              <div class="account-meta-row">
-                <span>Kullanıcı Adı</span>
-                <strong id="acc-info-username">@nihatstark</strong>
+            <div class="card">
+              <div class="card-head">
+                <div>
+                  <h2>Oturum & Hesap Özeti</h2>
+                  <p class="subtitle">Aktif oturum güvenliği ve bulut senkronizasyon durumu.</p>
+                </div>
               </div>
-              <div class="account-meta-row">
-                <span>Son Giriş</span>
-                <strong id="acc-info-last-login">-</strong>
-              </div>
-              <div class="account-meta-row">
-                <span>Veri Depolama</span>
-                <strong id="acc-info-storage">Şifreli Kalıcı Bulut Hesabı</strong>
-              </div>
-            </div>
 
-            <form id="account-password-form" class="account-form" style="margin-top:14px;">
-              <label class="field-label">
-                <span>Mevcut Şifre</span>
-                <input type="password" id="acc-cur-pwd" class="input" autocomplete="current-password" placeholder="Mevcut şifreniz" required />
-              </label>
-              <div class="account-form-row">
-                <label class="field-label">
-                  <span>Yeni Şifre</span>
-                  <input type="password" id="acc-new-pwd" class="input" autocomplete="new-password" minlength="6" placeholder="En az 6 karakter" required />
-                </label>
-                <label class="field-label">
-                  <span>Yeni Şifre (Tekrar)</span>
-                  <input type="password" id="acc-new-pwd2" class="input" autocomplete="new-password" minlength="6" placeholder="Tekrar girin" required />
-                </label>
+              <div class="account-meta-box">
+                <div class="account-meta-row">
+                  <span>Kullanıcı Adı</span>
+                  <strong id="acc-info-username">@nihatstark</strong>
+                </div>
+                <div class="account-meta-row">
+                  <span>Son Giriş</span>
+                  <strong id="acc-info-last-login">-</strong>
+                </div>
+                <div class="account-meta-row">
+                  <span>Veri Depolama</span>
+                  <strong id="acc-info-storage">Şifreli Kalıcı Bulut Hesabı</strong>
+                </div>
               </div>
-              <div class="account-form-actions">
-                <button type="submit" class="btn btn-primary" id="btn-change-password">Şifreyi Güncelle</button>
+
+              <div class="account-form-actions" style="margin-top:16px;">
                 <button type="button" class="btn btn-soft" id="btn-logout-all-devices">Diğer Cihazlardan Çıkış Yap</button>
+                <button type="button" class="btn btn-danger-soft" id="btn-account-logout-2">Bu Cihazdan Çıkış Yap</button>
               </div>
-            </form>
+            </div>
           </div>
+        </div>
 
-          <!-- Card 4: Admin User Management -->
-          <div class="card hidden" id="card-admin-users">
+        <!-- TAB 4: Admin User Management -->
+        <div class="profile-tab-panel" id="profile-panel-users">
+          <div class="card" id="card-admin-users">
             <div class="card-head">
-              <h2>Kullanıcı Hesapları</h2>
+              <div>
+                <h2>Kullanıcı Hesapları</h2>
+                <p class="subtitle">Her kullanıcı kendi şifreli ürünlerine, API anahtarlarına, profil fotoğrafına ve tema özelleştirmelerine sahip olur.</p>
+              </div>
               <span class="badge badge-info">İzole Çalışma Alanları</span>
             </div>
-            <p class="account-card-desc">Her kullanıcı kendi şifreli ürünlerine, API anahtarlarına ve tema özelleştirmelerine sahip olur.</p>
 
             <div class="account-users-list" id="admin-users-list"></div>
 
-            <form id="admin-create-user-form" class="account-form" style="margin-top:14px;">
+            <form id="admin-create-user-form" class="account-form" style="margin-top:16px;">
               <div class="account-form-row">
                 <label class="field-label">
                   <span>Yeni Kullanıcı Adı</span>

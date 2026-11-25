@@ -2372,6 +2372,25 @@ function setAvatarColorClass(el, colorName) {
   el.classList.add(AVATAR_COLOR_CLASSES.includes(cls) ? cls : 'av-khaki');
 }
 
+function renderAvatarGraphic(containerEl, initialsEl, imgEl, avatarUrl, initials, colorName) {
+  setAvatarColorClass(containerEl, colorName);
+  const safeUrl = safeImgSrc(avatarUrl);
+  if (imgEl && safeUrl) {
+    imgEl.src = safeUrl;
+    imgEl.classList.remove('hidden');
+    if (initialsEl) initialsEl.classList.add('hidden');
+  } else {
+    if (imgEl) {
+      imgEl.removeAttribute('src');
+      imgEl.classList.add('hidden');
+    }
+    if (initialsEl) {
+      initialsEl.textContent = initials;
+      initialsEl.classList.remove('hidden');
+    }
+  }
+}
+
 function applyUserProfileToUi() {
   const p = state.userProfile || {};
   const u = state.user || {};
@@ -2384,9 +2403,11 @@ function applyUserProfileToUi() {
   const panelTitle = p.PanelTitle || 'Smart';
   const storeName = p.StoreName || 'Pazaryeri Otomasyonu';
   const dispName = p.DisplayName || u.displayName || u.username || 'Kullanıcı';
-  const handle = '@' + (u.username || 'kullanici');
+  const jobTitle = (p.JobTitle || '').trim();
+  const handle = jobTitle ? jobTitle : ('@' + (u.username || 'kullanici'));
   const initials = (p.AvatarInitials || dispName.slice(0, 2)).toUpperCase();
   const avColor = p.AvatarColor || 'khaki';
+  const avUrl = p.AvatarUrl || '';
 
   document.title = `${panelTitle} — ${storeName}`;
 
@@ -2398,16 +2419,18 @@ function applyUserProfileToUi() {
   if (mbName) mbName.textContent = panelTitle;
 
   const sbAv = document.getElementById('sidebar-user-avatar');
+  const sbInit = document.getElementById('sidebar-user-initials');
+  const sbImg = document.getElementById('sidebar-user-avatar-img');
   const sbUserName = document.getElementById('sidebar-user-name');
   const sbHandle = document.getElementById('sidebar-user-handle');
   const mbAvBtn = document.getElementById('btn-mobile-account');
   const mbInit = document.getElementById('mobile-user-initials');
+  const mbImg = document.getElementById('mobile-user-avatar-img');
 
-  if (sbAv) { sbAv.textContent = initials; setAvatarColorClass(sbAv, avColor); }
+  renderAvatarGraphic(sbAv, sbInit, sbImg, avUrl, initials, avColor);
+  renderAvatarGraphic(mbAvBtn, mbInit, mbImg, avUrl, initials, avColor);
   if (sbUserName) sbUserName.textContent = dispName;
   if (sbHandle) sbHandle.textContent = handle;
-  if (mbAvBtn) setAvatarColorClass(mbAvBtn, avColor);
-  if (mbInit) mbInit.textContent = initials;
 }
 
 function renderAccountView() {
@@ -2415,18 +2438,49 @@ function renderAccountView() {
   const u = state.user || {};
 
   const dispName = p.DisplayName || u.displayName || u.username || '';
+  const jobTitle = (p.JobTitle || '').trim();
+  const storeName = p.StoreName || 'Pazaryeri Otomasyonu';
   const initials = (p.AvatarInitials || dispName.slice(0, 2)).toUpperCase();
   const avColor = p.AvatarColor || 'khaki';
+  const avUrl = p.AvatarUrl || '';
   const theme = p.Theme || 'khaki';
 
   const heroAv = document.getElementById('acc-avatar-preview');
+  const heroInit = document.getElementById('acc-avatar-initials');
+  const heroImg = document.getElementById('acc-avatar-img');
   const heroName = document.getElementById('acc-hero-name');
+  const heroJob = document.getElementById('acc-hero-job');
   const heroSub = document.getElementById('acc-hero-sub');
+  const heroBio = document.getElementById('acc-hero-bio');
   const roleBadge = document.getElementById('acc-role-badge');
-  if (heroAv) { heroAv.textContent = initials; setAvatarColorClass(heroAv, avColor); }
+  const removeBtn = document.getElementById('btn-remove-avatar');
+  const uploadBtn = document.getElementById('btn-upload-avatar');
+
+  renderAvatarGraphic(heroAv, heroInit, heroImg, avUrl, initials, avColor);
+  if (removeBtn) removeBtn.classList.toggle('hidden', !safeImgSrc(avUrl));
+  if (uploadBtn) uploadBtn.textContent = safeImgSrc(avUrl) ? 'Fotoğrafı Değiştir' : 'Fotoğraf Yükle';
+
   if (heroName) heroName.textContent = dispName || 'Kullanıcı';
-  if (heroSub) heroSub.textContent = `@${u.username || ''} • Kalıcı Bulut Hesabı`;
+  if (heroJob) heroJob.textContent = jobTitle ? `${jobTitle} • ${storeName}` : storeName;
+  if (heroSub) heroSub.textContent = `@${u.username || ''}${p.Email ? ' • ' + p.Email : ' • Kalıcı Bulut Hesabı'}`;
+  if (heroBio) {
+    const bioTxt = (p.Bio || '').trim();
+    heroBio.textContent = bioTxt;
+    heroBio.classList.toggle('hidden', !bioTxt);
+  }
   if (roleBadge) roleBadge.textContent = u.isAdmin ? 'Yönetici' : 'Kullanıcı';
+
+  // Quiet workspace stats strip
+  const stProd = document.getElementById('acc-stat-products');
+  const stCh = document.getElementById('acc-stat-channels');
+  const stLogin = document.getElementById('acc-stat-last-login');
+  const enabledCh = state.marketplaces.filter(m => m.Enabled).length;
+  if (stProd) stProd.textContent = String(state.products.length);
+  if (stCh) stCh.textContent = `${enabledCh}/${state.marketplaces.length || 7}`;
+  if (stLogin) {
+    const raw = u.lastLoginAt || '';
+    stLogin.textContent = raw ? raw.slice(5, 16) : 'Aktif';
+  }
 
   document.querySelectorAll('#acc-swatch-row .swatch-btn').forEach(btn => {
     btn.classList.toggle('active', btn.dataset.avatarColor === avColor);
@@ -2434,6 +2488,7 @@ function renderAccountView() {
 
   const setVal = (id, v) => { const el = document.getElementById(id); if (el) el.value = v || ''; };
   setVal('acc-display-name', p.DisplayName);
+  setVal('acc-job-title', p.JobTitle);
   setVal('acc-initials', p.AvatarInitials);
   setVal('acc-panel-title', p.PanelTitle || 'Smart');
   setVal('acc-store-name', p.StoreName || 'Pazaryeri Otomasyonu');
@@ -2451,32 +2506,28 @@ function renderAccountView() {
   if (uNameEl) uNameEl.textContent = '@' + (u.username || '');
   if (lastLoginEl) lastLoginEl.textContent = u.lastLoginAt || 'Aktif oturum';
 
-  // Admin user list card
-  const adminCard = document.getElementById('card-admin-users');
+  // Admin users tab visibility & list
+  const adminTabBtn = document.getElementById('tab-admin-users');
   const usersList = document.getElementById('admin-users-list');
-  if (adminCard && usersList) {
-    if (u.isAdmin) {
-      adminCard.classList.remove('hidden');
-      const users = Array.isArray(u.users) ? u.users : [];
-      usersList.innerHTML = users.map(item => {
-        const isSelf = item.username === u.username;
-        const init = (item.displayName || item.username || 'U').slice(0, 2).toUpperCase();
-        return `
-          <div class="account-user-row">
-            <div class="account-user-row-left">
-              <div class="user-avatar ${item.role === 'admin' ? 'av-khaki' : 'av-slate'}">${esc(init)}</div>
-              <div>
-                <div class="account-user-row-name">${esc(item.displayName || item.username)} <span class="badge ${item.role === 'admin' ? 'badge-khaki' : 'badge-neutral'}">${item.role === 'admin' ? 'Yönetici' : 'Kullanıcı'}</span></div>
-                <div class="account-user-row-sub">@${esc(item.username)}${item.lastLoginAt ? ' • Son giriş: ' + esc(item.lastLoginAt) : ''}</div>
-              </div>
+  if (adminTabBtn) adminTabBtn.classList.toggle('hidden', !u.isAdmin);
+  if (usersList && u.isAdmin) {
+    const users = Array.isArray(u.users) ? u.users : [];
+    usersList.innerHTML = users.map(item => {
+      const isSelf = item.username === u.username;
+      const init = (item.displayName || item.username || 'U').slice(0, 2).toUpperCase();
+      return `
+        <div class="account-user-row">
+          <div class="account-user-row-left">
+            <div class="user-avatar ${item.role === 'admin' ? 'av-khaki' : 'av-slate'}">${esc(init)}</div>
+            <div>
+              <div class="account-user-row-name">${esc(item.displayName || item.username)} <span class="badge ${item.role === 'admin' ? 'badge-khaki' : 'badge-neutral'}">${item.role === 'admin' ? 'Yönetici' : 'Kullanıcı'}</span></div>
+              <div class="account-user-row-sub">@${esc(item.username)}${item.lastLoginAt ? ' • Son giriş: ' + esc(item.lastLoginAt) : ''}</div>
             </div>
-            ${isSelf ? '<span class="badge badge-success">Aktif</span>' : `<button type="button" class="btn btn-danger-soft btn-xs" data-action="delete-user" data-username="${escAttr(item.username)}">Sil</button>`}
           </div>
-        `;
-      }).join('');
-    } else {
-      adminCard.classList.add('hidden');
-    }
+          ${isSelf ? '<span class="badge badge-success">Aktif</span>' : `<button type="button" class="btn btn-danger-soft btn-xs" data-action="delete-user" data-username="${escAttr(item.username)}">Sil</button>`}
+        </div>
+      `;
+    }).join('');
   }
 }
 
@@ -2485,16 +2536,110 @@ function collectAccountProfilePayload() {
   const activeTheme = document.querySelector('#acc-theme-grid .theme-card.active');
   return {
     DisplayName: (document.getElementById('acc-display-name')?.value || '').trim(),
+    JobTitle: (document.getElementById('acc-job-title')?.value || '').trim(),
     AvatarInitials: (document.getElementById('acc-initials')?.value || '').trim(),
     PanelTitle: (document.getElementById('acc-panel-title')?.value || '').trim() || 'Smart',
     StoreName: (document.getElementById('acc-store-name')?.value || '').trim() || 'Pazaryeri Otomasyonu',
     Email: (document.getElementById('acc-email')?.value || '').trim(),
     Bio: (document.getElementById('acc-bio')?.value || '').trim(),
+    AvatarUrl: state.userProfile ? (state.userProfile.AvatarUrl || '') : '',
     AvatarColor: activeSwatch ? activeSwatch.dataset.avatarColor : (state.userProfile?.AvatarColor || 'khaki'),
     Theme: activeTheme ? activeTheme.dataset.themePick : (state.userProfile?.Theme || 'khaki'),
     Density: document.getElementById('acc-density')?.value || 'comfortable',
     DefaultView: document.getElementById('acc-default-view')?.value || 'dashboard'
   };
+}
+
+function cropAvatarFileToSquareJpeg(file, size = 360) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error('Görsel okunamadı.'));
+    reader.onload = () => {
+      const img = new Image();
+      img.onerror = () => reject(new Error('Geçerli bir görsel dosyası seçin (JPG, PNG veya WEBP).'));
+      img.onload = () => {
+        const sw = img.naturalWidth || img.width;
+        const sh = img.naturalHeight || img.height;
+        const side = Math.min(sw, sh);
+        const sx = Math.floor((sw - side) / 2);
+        const sy = Math.floor((sh - side) / 2);
+        const canvas = document.createElement('canvas');
+        canvas.width = size;
+        canvas.height = size;
+        const ctx = canvas.getContext('2d');
+        ctx.fillStyle = '#FAFAF8';
+        ctx.fillRect(0, 0, size, size);
+        ctx.imageSmoothingEnabled = true;
+        ctx.imageSmoothingQuality = 'high';
+        ctx.drawImage(img, sx, sy, side, side, 0, 0, size, size);
+        resolve(canvas.toDataURL('image/jpeg', 0.90));
+      };
+      img.src = reader.result;
+    };
+    reader.readAsDataURL(file);
+  });
+}
+
+async function handleAvatarFileUpload(file) {
+  if (!file) return;
+  if (!file.type || !file.type.startsWith('image/')) {
+    toast('Lütfen JPG, PNG veya WEBP formatında bir fotoğraf seçin.', 'error');
+    return;
+  }
+  if (file.size > 12 * 1024 * 1024) {
+    toast('Fotoğraf boyutu 12 MB sınırını aşmamalıdır.', 'error');
+    return;
+  }
+  const btn = document.getElementById('btn-upload-avatar');
+  if (btn) { btn.disabled = true; btn.textContent = 'Yükleniyor...'; }
+  try {
+    const dataUrl = await cropAvatarFileToSquareJpeg(file, 360);
+    const res = await apiFetch('/api/account/avatar', {
+      method: 'POST',
+      body: JSON.stringify({ fileName: 'avatar.jpg', data: dataUrl })
+    });
+    state.userProfile = res.userProfile || { ...(state.userProfile || {}), AvatarUrl: res.avatarUrl };
+    applyUserProfileToUi();
+    renderAccountView();
+    markSaved();
+    toast('Profil fotoğrafınız güncellendi ve tüm cihazlarınıza eşitlendi.', 'success');
+  } catch (err) {
+    toast('Fotoğraf yüklenemedi: ' + err.message, 'error');
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = safeImgSrc(state.userProfile?.AvatarUrl) ? 'Fotoğrafı Değiştir' : 'Fotoğraf Yükle'; }
+  }
+}
+
+async function handleAvatarRemove() {
+  const ok = await smartConfirm({
+    eyebrow: 'Profil Görseli',
+    title: 'Profil fotoğrafı kaldırılsın mı?',
+    message: 'Fotoğrafınız kaldırıldığında sade monogram rozetiniz görünecektir.',
+    confirmText: 'Kaldır',
+    cancelText: 'Vazgeç'
+  });
+  if (!ok) return;
+  try {
+    const res = await apiFetch('/api/account/avatar/remove', { method: 'POST', body: '{}' });
+    state.userProfile = res.userProfile || { ...(state.userProfile || {}), AvatarUrl: '' };
+    applyUserProfileToUi();
+    renderAccountView();
+    markSaved();
+    toast('Profil fotoğrafı kaldırıldı.', 'info');
+  } catch (err) {
+    toast('Kaldırılamadı: ' + err.message, 'error');
+  }
+}
+
+function switchProfileTab(tabName) {
+  document.querySelectorAll('.profile-tab').forEach(btn => {
+    const active = btn.dataset.profileTab === tabName;
+    btn.classList.toggle('active', active);
+    btn.setAttribute('aria-selected', active ? 'true' : 'false');
+  });
+  document.querySelectorAll('.profile-tab-panel').forEach(panel => {
+    panel.classList.toggle('active', panel.id === 'profile-panel-' + tabName);
+  });
 }
 
 async function saveUserProfile(successMsg) {
@@ -2574,7 +2719,42 @@ async function handleDeleteUser(username) {
 function bindAccountEvents() {
   document.getElementById('btn-sidebar-logout')?.addEventListener('click', handleLogout);
   document.getElementById('btn-account-logout')?.addEventListener('click', handleLogout);
+  document.getElementById('btn-account-logout-2')?.addEventListener('click', handleLogout);
   document.getElementById('btn-logout-all-devices')?.addEventListener('click', handleLogoutAll);
+
+  // Profile sub-tabs
+  document.querySelectorAll('.profile-tab').forEach(btn => {
+    btn.addEventListener('click', () => switchProfileTab(btn.dataset.profileTab || 'identity'));
+  });
+
+  // Profile photo upload (button, avatar click, dropzone click & drag-drop)
+  const avInput = document.getElementById('acc-avatar-file');
+  const openPicker = () => { if (avInput) avInput.click(); };
+  document.getElementById('acc-avatar-preview')?.addEventListener('click', openPicker);
+  document.getElementById('btn-upload-avatar')?.addEventListener('click', openPicker);
+  document.getElementById('btn-upload-avatar-2')?.addEventListener('click', openPicker);
+  document.getElementById('btn-remove-avatar')?.addEventListener('click', handleAvatarRemove);
+
+  avInput?.addEventListener('change', () => {
+    if (avInput.files && avInput.files[0]) {
+      handleAvatarFileUpload(avInput.files[0]);
+      avInput.value = '';
+    }
+  });
+
+  const dropzone = document.getElementById('acc-avatar-dropzone');
+  if (dropzone) {
+    ['dragenter', 'dragover'].forEach(ev => {
+      dropzone.addEventListener(ev, e => { e.preventDefault(); dropzone.classList.add('drag-over'); });
+    });
+    ['dragleave', 'drop'].forEach(ev => {
+      dropzone.addEventListener(ev, e => { e.preventDefault(); dropzone.classList.remove('drag-over'); });
+    });
+    dropzone.addEventListener('drop', e => {
+      const f = e.dataTransfer?.files?.[0];
+      if (f) handleAvatarFileUpload(f);
+    });
+  }
 
   // Live avatar color preview
   document.querySelectorAll('#acc-swatch-row .swatch-btn').forEach(btn => {
@@ -2588,8 +2768,13 @@ function bindAccountEvents() {
   // Live initials preview
   document.getElementById('acc-initials')?.addEventListener('input', e => {
     const val = (e.target.value || '').toUpperCase().slice(0, 3);
-    const prev = document.getElementById('acc-avatar-preview');
+    const prev = document.getElementById('acc-avatar-initials');
     if (prev && val) prev.textContent = val;
+  });
+
+  // Save monogram shortcut
+  document.getElementById('btn-save-monogram')?.addEventListener('click', () => {
+    saveUserProfile('Monogram ayarlarınız kaydedildi.');
   });
 
   // Live theme preview on click

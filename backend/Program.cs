@@ -448,6 +448,56 @@ namespace SmartMarketplace
                 return;
             }
 
+            if (path == "/api/account/avatar" && req.Method == "POST")
+            {
+                if (!Security.IsValidSessionToken(req.Headers))
+                {
+                    WriteJson(stream, 403, new { ok = false, error = "Yetkisiz istek." });
+                    return;
+                }
+                if (!Security.CheckRateLimit("avatar_upload", 20))
+                {
+                    WriteJson(stream, 429, new { ok = false, error = "Çok sık fotoğraf yükleme isteği. Lütfen biraz bekleyin." });
+                    return;
+                }
+                var body = Storage.Deserialize<Dictionary<string, object>>(req.Body);
+                string fileName = body != null && body.ContainsKey("fileName") ? Convert.ToString(body["fileName"]) : "avatar.jpg";
+                string data = body != null && body.ContainsKey("data") ? Convert.ToString(body["data"]) : "";
+                try
+                {
+                    string avatarUrl = Storage.SaveBase64Image(fileName, data);
+                    var dbAv = Storage.Load();
+                    if (dbAv.UserProfile == null) dbAv.UserProfile = new UserProfileSettings();
+                    dbAv.UserProfile.AvatarUrl = avatarUrl;
+                    dbAv.UserProfile.UpdatedAt = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss");
+                    Storage.AddLog(dbAv, "system", "info", "Profil", "Profil fotoğrafı güncellendi ve kalıcı olarak kaydedildi.");
+                    Storage.Save(dbAv);
+                    WriteJson(stream, 200, new { ok = true, avatarUrl = avatarUrl, userProfile = dbAv.UserProfile });
+                }
+                catch (Exception ex)
+                {
+                    WriteJson(stream, 400, new { ok = false, error = ex.Message });
+                }
+                return;
+            }
+
+            if (path == "/api/account/avatar/remove" && req.Method == "POST")
+            {
+                if (!Security.IsValidSessionToken(req.Headers))
+                {
+                    WriteJson(stream, 403, new { ok = false, error = "Yetkisiz istek." });
+                    return;
+                }
+                var dbAv = Storage.Load();
+                if (dbAv.UserProfile == null) dbAv.UserProfile = new UserProfileSettings();
+                dbAv.UserProfile.AvatarUrl = "";
+                dbAv.UserProfile.UpdatedAt = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss");
+                Storage.AddLog(dbAv, "system", "info", "Profil", "Profil fotoğrafı kaldırıldı.");
+                Storage.Save(dbAv);
+                WriteJson(stream, 200, new { ok = true, userProfile = dbAv.UserProfile });
+                return;
+            }
+
             if (path == "/api/account/profile" && req.Method == "POST")
             {
                 if (!Security.IsValidSessionToken(req.Headers))
@@ -465,6 +515,8 @@ namespace SmartMarketplace
                 var p = dbProf.UserProfile ?? new UserProfileSettings();
                 string disp = (incoming.DisplayName ?? "").Trim();
                 if (!string.IsNullOrEmpty(disp)) p.DisplayName = disp.Length > 60 ? disp.Substring(0, 60) : disp;
+                string job = (incoming.JobTitle ?? "").Trim();
+                p.JobTitle = job.Length > 60 ? job.Substring(0, 60) : job;
                 string store = (incoming.StoreName ?? "").Trim();
                 p.StoreName = string.IsNullOrEmpty(store) ? "Pazaryeri Otomasyonu" : (store.Length > 60 ? store.Substring(0, 60) : store);
                 string panel = (incoming.PanelTitle ?? "").Trim();
@@ -473,6 +525,12 @@ namespace SmartMarketplace
                 p.Email = email.Length > 100 ? email.Substring(0, 100) : email;
                 string bio = (incoming.Bio ?? "").Trim();
                 p.Bio = bio.Length > 240 ? bio.Substring(0, 240) : bio;
+                if (incoming.AvatarUrl != null)
+                {
+                    string avUrl = incoming.AvatarUrl.Trim();
+                    if (string.IsNullOrEmpty(avUrl) || Security.IsSafeImageUrl(avUrl))
+                        p.AvatarUrl = avUrl;
+                }
 
                 string[] validColors = { "khaki", "slate", "forest", "amber", "plum", "terracotta" };
                 p.AvatarColor = validColors.Contains((incoming.AvatarColor ?? "").ToLowerInvariant()) ? incoming.AvatarColor.ToLowerInvariant() : "khaki";
@@ -823,7 +881,9 @@ namespace SmartMarketplace
             }
 
             int maxAllowed = MaxDefaultBodyBytes;
-            if (decodedPath.StartsWith("/api/upload", StringComparison.OrdinalIgnoreCase)) maxAllowed = MaxUploadBodyBytes;
+            if (decodedPath.StartsWith("/api/upload", StringComparison.OrdinalIgnoreCase)
+                || decodedPath.StartsWith("/api/account/avatar", StringComparison.OrdinalIgnoreCase))
+                maxAllowed = MaxUploadBodyBytes;
             else if (decodedPath.StartsWith("/api/backup/import", StringComparison.OrdinalIgnoreCase)) maxAllowed = MaxBackupBodyBytes;
 
             int bodyStart = headerEnd + 4;

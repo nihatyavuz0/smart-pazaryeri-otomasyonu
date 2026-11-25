@@ -34,10 +34,12 @@ namespace SmartMarketplace
     public class UserProfileSettings
     {
         public string DisplayName { get; set; }
+        public string JobTitle { get; set; }
         public string StoreName { get; set; }
         public string PanelTitle { get; set; }
         public string Email { get; set; }
         public string Bio { get; set; }
+        public string AvatarUrl { get; set; }
         public string AvatarColor { get; set; } // "khaki", "slate", "forest", "amber", "plum", "terracotta"
         public string AvatarInitials { get; set; }
         public string Theme { get; set; }       // "khaki", "slate", "forest", "sand", "dark"
@@ -48,10 +50,12 @@ namespace SmartMarketplace
         public UserProfileSettings()
         {
             DisplayName = "Nihat Stark";
+            JobTitle = "Mağaza Yöneticisi";
             StoreName = "Pazaryeri Otomasyonu";
             PanelTitle = "Smart";
             Email = "";
             Bio = "";
+            AvatarUrl = "";
             AvatarColor = "khaki";
             AvatarInitials = "NS";
             Theme = "khaki";
