@@ -1,0 +1,22 @@
+{
+  "name": "Smart — Pazaryeri Otomasyonu",
+  "short_name": "Smart",
+  "description": "Pazaryeri ürün yükleme, rakip analizi ve anlık stok senkronizasyonu",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#F3F4F0",
+  "theme_color": "#EAECE6",
+  "icons": [
+    {
+      "src": "/logo.png",
+      "sizes": "256x256",
+      "type": "image/png",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "/favicon.png",
+      "sizes": "64x64",
+      "type": "image/png"
+    }
+  ]
+}

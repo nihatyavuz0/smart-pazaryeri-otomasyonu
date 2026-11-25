@@ -1,0 +1,19 @@
+# User data, encrypted API keys, local uploads & caches (NEVER commit!)
+data/
+*.db
+*.sqlite
+
+# Compiled binaries & temporary build outputs (auto-built by Smart.bat / build.bat)
+SmartServer.exe
+SmartServer_new.exe
+SmartServer_update.exe
+SmartServer_build.tmp.exe
+*.tmp.exe
+
+# OS & editor files
+.DS_Store
+Thumbs.db
+desktop.ini
+.vscode/
+.idea/
+*.log

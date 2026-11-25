@@ -1,0 +1,471 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <meta name="theme-color" content="#EAECE6" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+  <meta name="apple-mobile-web-app-title" content="Smart" />
+  <!--SMART_SESSION_TOKEN-->
+  <link rel="manifest" href="/manifest.json" />
+  <link rel="icon" type="image/png" href="/favicon.png" />
+  <link rel="apple-touch-icon" href="/logo.png" />
+  <title>Smart — Pazaryeri Ürün Yükleme & Stok Otomasyonu</title>
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <!-- Mobile-Only Sticky Top Bar (hidden on desktop) -->
+  <header class="mobile-topbar">
+    <div class="mobile-brand">
+      <div class="mobile-brand-mark">
+        <img src="/logo.png" alt="Smart" />
+      </div>
+      <div>
+        <div class="mobile-brand-name">Smart</div>
+        <div class="mobile-brand-sub" id="mobile-persist-text">Kalıcı Kayıt Aktif</div>
+      </div>
+    </div>
+    <div class="mobile-topbar-actions">
+      <button type="button" class="btn btn-khaki-soft btn-xs" id="btn-mobile-sync" aria-label="Stokları Eşitle">Eşitle</button>
+    </div>
+  </header>
+
+  <div class="app-shell">
+    <!-- Left Sidebar -->
+    <aside class="sidebar">
+      <div class="brand">
+        <div class="brand-mark">
+          <img src="/logo.png" alt="Smart Logo" class="brand-logo-img" />
+        </div>
+        <div>
+          <div class="brand-name">Smart</div>
+          <div class="brand-sub">Pazaryeri Otomasyonu</div>
+        </div>
+      </div>
+
+      <nav class="nav">
+        <button class="nav-item active" data-view="dashboard">
+          <span class="nav-icon">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="9" rx="1.5"/><rect x="14" y="3" width="7" height="5" rx="1.5"/><rect x="14" y="12" width="7" height="9" rx="1.5"/><rect x="3" y="16" width="7" height="5" rx="1.5"/></svg>
+          </span>
+          <span>Genel Bakış</span>
+        </button>
+
+        <button class="nav-item" data-view="add-product">
+          <span class="nav-icon">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><line x1="12" y1="8" x2="12" y2="16"/><line x1="8" y1="12" x2="16" y2="12"/></svg>
+          </span>
+          <span>Ürün Ekle</span>
+          <span class="nav-pill">Otomatik</span>
+        </button>
+
+        <button class="nav-item" data-view="inventory">
+          <span class="nav-icon">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><polyline points="3.27 6.96 12 12.01 20.73 6.96"/><line x1="12" y1="22.08" x2="12" y2="12"/></svg>
+          </span>
+          <span>Ürünler & Stok</span>
+          <span class="nav-count" id="nav-product-count">0</span>
+        </button>
+
+        <button class="nav-item" data-view="apis">
+          <span class="nav-icon">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>
+          </span>
+          <span>API Bağlantıları</span>
+        </button>
+
+        <button class="nav-item" data-view="logs">
+          <span class="nav-icon">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>
+          </span>
+          <span>İşlem Kayıtları</span>
+        </button>
+      </nav>
+
+      <div class="sidebar-footer">
+        <div class="persist-pill" id="persist-status" title="Tüm değişiklikler otomatik olarak diske kaydedilir">
+          <span class="persist-dot"></span>
+          <span id="persist-text">Kalıcı Kayıt Aktif</span>
+        </div>
+        <div class="sync-status-card">
+          <div class="sync-row">
+            <span class="status-dot" id="sidebar-sync-dot"></span>
+            <span class="sync-label" id="sidebar-sync-text">Oto-Stok Senkron Aktif</span>
+          </div>
+          <div class="sync-sub" id="sidebar-last-sync">Henüz senkronize edilmedi</div>
+          <button class="btn btn-soft btn-sm btn-full" id="btn-quick-sync">Şimdi Senkronize Et</button>
+          <div class="backup-row">
+            <button class="btn btn-ghost btn-xs" id="btn-export-backup" title="Tüm verileri JSON olarak yedekle">Yedek Al</button>
+            <button class="btn btn-ghost btn-xs" id="btn-import-backup" title="Yedek dosyasından geri yükle">Yükle</button>
+            <button class="btn btn-ghost btn-xs" id="btn-mobile-access" title="Telefondan bağlanma adresini göster">Mobil</button>
+            <input type="file" id="backup-file-input" accept=".json,application/json" hidden />
+          </div>
+        </div>
+      </div>
+    </aside>
+
+    <!-- Main Content -->
+    <main class="main">
+      <!-- DASHBOARD VIEW -->
+      <section class="view active" id="view-dashboard">
+        <header class="page-header">
+          <div>
+            <h1>Genel Bakış</h1>
+            <p class="subtitle">Tüm pazaryerleriniz tek merkezden, göz yormayan sade bir akışla yönetilir.</p>
+          </div>
+          <button class="btn btn-primary" data-nav="add-product">+ Yeni Ürün Ekle</button>
+        </header>
+
+        <div class="kpi-grid">
+          <div class="kpi-card">
+            <div class="kpi-label">Kayıtlı Ürün</div>
+            <div class="kpi-value" id="kpi-products">0</div>
+            <div class="kpi-hint">Tüm kanallarda aktif yönetilen</div>
+          </div>
+          <div class="kpi-card">
+            <div class="kpi-label">Aktif Pazaryeri</div>
+            <div class="kpi-value" id="kpi-channels">7</div>
+            <div class="kpi-hint" id="kpi-channels-hint">Canlı ve Test kanalları</div>
+          </div>
+          <div class="kpi-card">
+            <div class="kpi-label">Toplam Merkez Stok</div>
+            <div class="kpi-value" id="kpi-stock">0</div>
+            <div class="kpi-hint">Anlık eşitlenen stok adedi</div>
+          </div>
+          <div class="kpi-card">
+            <div class="kpi-label">Kritik Stok Uyarısı</div>
+            <div class="kpi-value" id="kpi-low-stock">0</div>
+            <div class="kpi-hint">Eşik altındaki ürünler</div>
+          </div>
+        </div>
+
+        <div class="grid-2">
+          <div class="card">
+            <div class="card-head">
+              <h2>Pazaryeri Durumları</h2>
+              <button class="btn btn-ghost btn-sm" data-nav="apis">API Ayarları →</button>
+            </div>
+            <div class="mp-status-list" id="dashboard-mp-list"></div>
+          </div>
+
+          <div class="card">
+            <div class="card-head">
+              <h2>Son Otomasyon Hareketleri</h2>
+              <button class="btn btn-ghost btn-sm" data-nav="logs">Tümünü Gör →</button>
+            </div>
+            <div class="activity-mini-list" id="dashboard-logs"></div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ADD PRODUCT VIEW -->
+      <section class="view" id="view-add-product">
+        <header class="page-header">
+          <div>
+            <h1>Ürün Ekle</h1>
+            <p class="subtitle">Görselleri bırakın ve ürün hakkında birkaç cümle yazın. Smart rakip analizi yapıp tüm pazaryerlerine uygun başlık, açıklama ve zorunlu özellikleri otomatik oluşturur.</p>
+          </div>
+        </header>
+
+        <div class="card">
+          <div class="wizard-grid">
+            <!-- Image Upload -->
+            <div>
+              <label class="field-label">Ürün Görselleri</label>
+              <div class="dropzone" id="dropzone">
+                <input type="file" id="file-input" accept="image/*" multiple hidden />
+                <div class="dropzone-icon">
+                  <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="3"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>
+                </div>
+                <div class="dropzone-title">Görselleri buraya sürükleyin veya seçin</div>
+                <div class="dropzone-sub">JPG, PNG, WEBP — Çoklu fotoğraf desteklenir</div>
+              </div>
+              <div class="thumb-list" id="uploaded-thumbs"></div>
+            </div>
+
+            <!-- Prompt Area -->
+            <div>
+              <label class="field-label" for="product-prompt">Ürün Özellikleri (Prompt)</label>
+              <textarea id="product-prompt" class="textarea" rows="5" placeholder="Örnek: Kadın oversize %100 pamuklu haki sweatshirt, M beden, günlük kullanıma uygun yumuşak şardonlu kumaş, 649 TL, 40 adet stok..."></textarea>
+
+              <div class="prompt-examples">
+                <span class="muted-label">Hızlı örnek:</span>
+                <button type="button" class="chip-btn" data-sample="Kadın oversize %100 pamuklu haki sweatshirt, yumuşak şardonlu içi polar, M beden, 649 TL, 45 adet stok">Haki Sweatshirt</button>
+                <button type="button" class="chip-btn" data-sample="Aktif gürültü engelleme özellikli kablosuz bluetooth 5.3 kulaklık, mat siyah, 40 saat pil ömrü, 1299 TL, 30 adet">Bluetooth Kulaklık</button>
+                <button type="button" class="chip-btn" data-sample="El yapımı mat bej seramik kahve fincan takımı 6 kişilik, bulaşık makinesinde yıkanabilir, 489 TL, 18 adet">Seramik Fincan</button>
+              </div>
+
+              <div class="optional-row">
+                <div class="input-group">
+                  <label>Fiyat (TL) <span class="opt">(opsiyonel)</span></label>
+                  <input type="number" id="opt-price" class="input" placeholder="Otomatik" step="0.01" />
+                </div>
+                <div class="input-group">
+                  <label>Stok Adedi <span class="opt">(opsiyonel)</span></label>
+                  <input type="number" id="opt-stock" class="input" placeholder="Otomatik" />
+                </div>
+                <div class="input-group">
+                  <label>Marka <span class="opt">(opsiyonel)</span></label>
+                  <input type="text" id="opt-brand" class="input" placeholder="Otomatik" />
+                </div>
+                <div class="input-group">
+                  <label>Barkod / EAN <span class="opt">(opsiyonel)</span></label>
+                  <input type="text" id="opt-barcode" class="input" placeholder="Otomatik EAN-13" />
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="divider"></div>
+
+          <div class="mp-picker-section">
+            <div class="mp-picker-head">
+              <label class="field-label">Yayınlanacak Pazaryerleri</label>
+              <button type="button" class="btn btn-ghost btn-sm" id="btn-toggle-all-mps">Tümünü Seç / Kaldır</button>
+            </div>
+            <div class="mp-chips" id="target-mp-chips"></div>
+          </div>
+
+          <div class="action-bar">
+            <button type="button" class="btn btn-primary btn-lg" id="btn-analyze">
+              Otomatik Analiz Et & Hazırla
+            </button>
+            <button type="button" class="btn btn-khaki-soft btn-lg" id="btn-autopilot">
+              Tam Otomatik Hazırla & Yayınla
+            </button>
+            <button type="button" class="btn btn-soft btn-sm" id="btn-clear-draft" title="Yalnızca siz istediğinizde taslağı temizler">
+              Taslağı Temizle
+            </button>
+            <span class="inline-status" id="analyze-status"></span>
+          </div>
+        </div>
+
+        <!-- Generated Preview & Competitor Analysis -->
+        <div id="generated-area" class="hidden">
+          <!-- Competitor Analysis Card -->
+          <div class="card card-tinted" id="competitor-card">
+            <div class="card-head">
+              <div>
+                <h2>Rakip Analizi & Eksik Alan Tamamlama</h2>
+                <p class="subtitle" id="comp-summary"></p>
+              </div>
+              <span class="badge badge-khaki" id="engine-badge">Smart Motoru</span>
+            </div>
+
+            <div class="comp-grid">
+              <div class="comp-box">
+                <div class="comp-box-title">Tespit Edilen Kategori & Fiyat Bandı</div>
+                <div class="comp-category" id="comp-category">-</div>
+                <div class="price-band" id="comp-price-band">-</div>
+                <div class="keyword-list" id="comp-keywords"></div>
+              </div>
+              <div class="comp-box">
+                <div class="comp-box-title">Otomatik Tamamlanan Eksik Bilgiler</div>
+                <ul class="clean-list" id="comp-autofilled"></ul>
+              </div>
+              <div class="comp-box">
+                <div class="comp-box-title">İncelenen Rakip Referansları</div>
+                <ul class="clean-list" id="comp-samples"></ul>
+              </div>
+            </div>
+          </div>
+
+          <!-- Per-Marketplace Generated Listings -->
+          <div class="card">
+            <div class="card-head">
+              <div>
+                <h2>Pazaryeri Bazlı Hazırlanan İçerikler</h2>
+                <p class="subtitle">Her pazaryerinin karakter sınırı, SEO kuralları ve zorunlu özellikleri otomatik ayarlandı. İsterseniz düzenleyip hemen yayınlayabilirsiniz.</p>
+              </div>
+              <button type="button" class="btn btn-primary" id="btn-publish-draft">Seçili Pazaryerlerinde Yayınla</button>
+            </div>
+
+            <div class="mp-tabs" id="listing-tabs"></div>
+            <div id="listing-editor"></div>
+          </div>
+        </div>
+      </section>
+
+      <!-- INVENTORY & STOCK VIEW -->
+      <section class="view" id="view-inventory">
+        <header class="page-header">
+          <div>
+            <h1>Ürünler & Stok Takibi</h1>
+            <p class="subtitle">Tek bir yerden stok güncelleyin veya sipariş geldiğinde tüm pazaryerlerinin anlık eşitlenmesini izleyin.</p>
+          </div>
+          <div class="header-actions">
+            <button class="btn btn-soft" id="btn-sync-all-top">Tüm Stokları Eşitle</button>
+            <button class="btn btn-primary" data-nav="add-product">+ Ürün Ekle</button>
+          </div>
+        </header>
+
+        <div class="card card-compact">
+          <div class="sync-toolbar">
+            <div class="search-box">
+              <input type="text" id="inventory-search" class="input" placeholder="Ürün adı, SKU veya barkod ara..." />
+            </div>
+            <div class="sync-controls">
+              <label class="switch-label">
+                <input type="checkbox" id="sync-auto-toggle" />
+                <span>Otomatik Senkron</span>
+              </label>
+              <select id="sync-interval" class="select">
+                <option value="1">Her 1 dk</option>
+                <option value="5">Her 5 dk</option>
+                <option value="15">Her 15 dk</option>
+                <option value="30">Her 30 dk</option>
+              </select>
+              <label class="inline-label">
+                Kritik Eşik:
+                <input type="number" id="sync-threshold" class="input input-xs" min="1" value="5" />
+              </label>
+              <button class="btn btn-soft btn-sm" id="btn-save-sync-cfg">Kaydet</button>
+            </div>
+          </div>
+        </div>
+
+        <div id="inventory-list" class="inventory-list"></div>
+      </section>
+
+      <!-- API CONNECTIONS VIEW -->
+      <section class="view" id="view-apis">
+        <header class="page-header">
+          <div>
+            <h1>API Bağlantıları</h1>
+            <p class="subtitle">Pazaryeri satıcı panelinizden aldığınız API anahtarlarını girip bağlantıyı doğrulayın. Tüm anahtarlar Windows DPAPI ile şifrelenerek saklanır ve asla açık metin olarak dışa aktarılmaz.</p>
+          </div>
+        </header>
+
+        <!-- Security Shield Status Strip -->
+        <div class="security-strip">
+          <span class="badge badge-success">DPAPI Şifreleme Aktif</span>
+          <span class="badge badge-khaki">256-bit Oturum & CSRF Koruması</span>
+          <span class="badge badge-info">Sıkı CSP & XSS Kalkanı</span>
+          <span class="badge badge-neutral">Yalnızca Yerel Erişim (127.0.0.1)</span>
+        </div>
+
+        <!-- AI Engine Settings Card -->
+        <div class="card card-tinted">
+          <div class="card-head">
+            <div>
+              <h2>Yapay Zeka & Rakip Analiz Motoru</h2>
+              <p class="subtitle">Gemini veya OpenAI API anahtarı eklerseniz metin üretimi LLM ile güçlenir; anahtar olmadan da Smart'ın yerleşik Türkçe e-ticaret SEO motoru sorunsuz çalışır.</p>
+            </div>
+            <button class="btn btn-primary btn-sm" id="btn-save-ai">AI Ayarlarını Kaydet</button>
+          </div>
+
+          <div class="ai-grid">
+            <div class="input-group">
+              <label>İçerik Üretim Motoru</label>
+              <select id="ai-provider" class="select">
+                <option value="auto">Otomatik (Anahtar Varsa AI, Yoksa Yerleşik Motor)</option>
+                <option value="gemini">Google Gemini</option>
+                <option value="openai">OpenAI</option>
+                <option value="builtin">Sadece Smart Yerleşik SEO Motoru</option>
+              </select>
+            </div>
+            <div class="input-group">
+              <label>Metin Tonu</label>
+              <select id="ai-tone" class="select">
+                <option value="professional">Profesyonel & Güven Verici</option>
+                <option value="persuasive">Yüksek Dönüşüm & Etkileyici</option>
+                <option value="minimal">Sade & Minimal</option>
+              </select>
+            </div>
+            <div class="input-group">
+              <label>Google Gemini API Key <span class="opt">(opsiyonel)</span></label>
+              <input type="password" id="ai-gemini-key" class="input" placeholder="AIza..." />
+            </div>
+            <div class="input-group">
+              <label>OpenAI API Key <span class="opt">(opsiyonel)</span></label>
+              <input type="password" id="ai-openai-key" class="input" placeholder="sk-..." />
+            </div>
+          </div>
+
+          <label class="switch-label" style="margin-top: 12px;">
+            <input type="checkbox" id="ai-web-comp" checked />
+            <span>Eksik ürün bilgisi olduğunda canlı web rakip analizini otomatik çalıştır</span>
+          </label>
+        </div>
+
+        <div class="api-grid" id="api-cards-grid"></div>
+      </section>
+
+      <!-- LOGS VIEW -->
+      <section class="view" id="view-logs">
+        <header class="page-header">
+          <div>
+            <h1>İşlem & Senkron Kayıtları</h1>
+            <p class="subtitle">Yayınlama, rakip analizi, API testleri ve stok eşitleme geçmişinin tamamı.</p>
+          </div>
+          <div class="header-actions">
+            <select id="log-filter" class="select">
+              <option value="all">Tüm İşlemler</option>
+              <option value="publish">Yayınlama</option>
+              <option value="sync">Stok Senkron</option>
+              <option value="analysis">Rakip & AI Analizi</option>
+              <option value="api">API Bağlantıları</option>
+            </select>
+            <button class="btn btn-soft btn-sm" id="btn-clear-logs">Temizle</button>
+          </div>
+        </header>
+
+        <div class="card">
+          <div id="logs-container" class="logs-list"></div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <!-- Mobile-Only Fixed Bottom App Navigation (hidden on desktop) -->
+  <nav class="mobile-bottom-nav" aria-label="Mobil Menü">
+    <button type="button" class="mnav-item active" data-view="dashboard">
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="9" rx="1.5"/><rect x="14" y="3" width="7" height="5" rx="1.5"/><rect x="14" y="12" width="7" height="9" rx="1.5"/><rect x="3" y="16" width="7" height="5" rx="1.5"/></svg>
+      <span>Özet</span>
+    </button>
+    <button type="button" class="mnav-item mnav-add" data-view="add-product">
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><line x1="12" y1="8" x2="12" y2="16"/><line x1="8" y1="12" x2="16" y2="12"/></svg>
+      <span>Ürün Ekle</span>
+    </button>
+    <button type="button" class="mnav-item" data-view="inventory">
+      <span class="mnav-icon-wrap">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><polyline points="3.27 6.96 12 12.01 20.73 6.96"/><line x1="12" y1="22.08" x2="12" y2="12"/></svg>
+        <span class="mnav-badge" id="mobile-product-count">0</span>
+      </span>
+      <span>Stok</span>
+    </button>
+    <button type="button" class="mnav-item" data-view="apis">
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>
+      <span>API</span>
+    </button>
+    <button type="button" class="mnav-item" data-view="logs">
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>
+      <span>Kayıt</span>
+    </button>
+  </nav>
+
+  <!-- Smart Signature Modal Backdrop -->
+  <div id="smart-modal-overlay" class="smart-modal-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="smart-modal-title">
+    <div class="smart-modal-card" id="smart-modal-card">
+      <div class="smart-modal-head">
+        <div class="smart-modal-badge" id="smart-modal-badge">
+          <img src="/logo.png" alt="" class="smart-modal-logo" />
+        </div>
+        <div class="smart-modal-head-text">
+          <div class="smart-modal-eyebrow" id="smart-modal-eyebrow">Smart</div>
+          <h3 class="smart-modal-title" id="smart-modal-title"></h3>
+        </div>
+        <button type="button" class="smart-modal-close" id="smart-modal-close" aria-label="Kapat">×</button>
+      </div>
+      <div class="smart-modal-body" id="smart-modal-body"></div>
+      <div class="smart-modal-actions" id="smart-modal-actions"></div>
+    </div>
+  </div>
+
+  <!-- Smart Signature Toast Notifications -->
+  <div id="toast-container" class="toast-container" aria-live="polite"></div>
+
+  <script src="/app.js"></script>
+</body>
+</html>
