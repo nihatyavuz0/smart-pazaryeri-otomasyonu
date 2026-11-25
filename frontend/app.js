@@ -515,6 +515,9 @@ function bindAddProductEvents() {
   document.getElementById('btn-publish-draft').addEventListener('click', publishCurrentDraft);
   document.getElementById('btn-clear-draft').addEventListener('click', clearDraftExplicitly);
 
+  const resetTopBtn = document.getElementById('btn-reset-top');
+  if (resetTopBtn) resetTopBtn.addEventListener('click', clearDraftExplicitly);
+
   const scanBtn = document.getElementById('btn-scan-vision');
   if (scanBtn) scanBtn.addEventListener('click', scanUploadedImagesWithVision);
 }
@@ -560,20 +563,26 @@ async function scanUploadedImagesWithVision() {
 
 async function clearDraftExplicitly() {
   const ok = await smartConfirm({
-    eyebrow: 'Taslak',
-    title: 'Taslağı temizlemek istiyor musunuz?',
-    message: 'Ürün Ekle ekranındaki mevcut taslak ve seçimler temizlenecektir. Kayıtlı ürünleriniz bu işlemden etkilenmez.',
-    confirmText: 'Taslağı Temizle',
+    eyebrow: 'Formu Sıfırla',
+    title: 'Yapılanları sıfırlamak istiyor musunuz?',
+    message: 'Yüklenen görseller, prompt metni, opsiyonel alanlar ve oluşturulan analiz taslağı tamamen temizlenecektir. Kayıtlı ürünleriniz etkilenmez.',
+    confirmText: 'Sıfırla ve Temizle',
     cancelText: 'Vazgeç',
     tone: 'neutral'
   });
   if (!ok) return;
   try {
     const res = await apiFetch('/api/draft/clear', { method: 'POST', body: '{}' });
+    state.uploadedFileNames = [];
+    const fi = document.getElementById('file-input');
+    if (fi) fi.value = '';
+    const vBox = document.getElementById('vision-summary-box');
+    if (vBox) vBox.classList.add('hidden');
     restoreDraftFromServer(res.draft);
+    renderTargetMpChips();
     document.getElementById('analyze-status').textContent = '';
-    markSaved('Taslak temizlendi');
-    toast('Taslak temizlendi.', 'info');
+    markSaved('Form sıfırlandı');
+    toast('Ürün ekleme formu tamamen sıfırlandı.', 'info');
   } catch (err) {
     toast('Hata: ' + err.message, 'error');
   }

@@ -726,6 +726,10 @@ body {
   margin-top: 20px;
 }
 
+.btn-reset-right {
+  margin-left: auto;
+}
+
 .inline-status {
   font-size: 13px;
   color: var(--khaki-text);
