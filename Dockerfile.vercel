@@ -1,0 +1,26 @@
+# Build stage (.NET 8 SDK on Alpine Linux)
+FROM mcr.microsoft.com/dotnet/sdk:8.0-alpine AS build
+WORKDIR /src
+
+COPY SmartServer.csproj ./
+RUN dotnet restore SmartServer.csproj
+
+COPY backend/ ./backend/
+RUN dotnet publish SmartServer.csproj -c Release -o /app/publish --no-restore
+
+# Runtime stage (.NET 8 Runtime + full ICU for tr-TR culture + Europe/Istanbul timezone)
+FROM mcr.microsoft.com/dotnet/aspnet:8.0-alpine AS runtime
+WORKDIR /app
+
+RUN apk add --no-cache icu-libs icu-data-full tzdata
+
+ENV DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=false
+ENV TZ=Europe/Istanbul
+ENV PORT=80
+ENV SMART_CLOUD_MODE=1
+
+COPY --from=build /app/publish ./
+COPY frontend/ ./frontend/
+
+EXPOSE 80
+ENTRYPOINT ["dotnet", "SmartServer.dll", "--no-browser"]

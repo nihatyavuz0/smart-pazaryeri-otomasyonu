@@ -15,15 +15,65 @@ namespace SmartMarketplace
         private static readonly Dictionary<string, List<DateTime>> _rateBuckets = new Dictionary<string, List<DateTime>>();
 
         public const string EncryptedPrefix = "dpapi:v1:";
+        public const string AesEncryptedPrefix = "aesgcm:v1:";
         public const string MaskedTokenPrefix = "••••••••";
+        public static bool IsCloudMode { get; private set; }
         public static string SessionToken { get; private set; }
         public static string RemoteAuthCookieToken { get; private set; }
         public static volatile string ActiveTunnelHost = "";
+        private static readonly byte[] _cloudKeyBytes;
+        private static readonly byte[] _cloudSessionKeyBytes;
 
         static Security()
         {
-            SessionToken = GenerateSecureToken(32);
-            RemoteAuthCookieToken = GenerateSecureToken(32);
+            string vercelEnv = Environment.GetEnvironmentVariable("VERCEL") ?? "";
+            string cloudFlag = Environment.GetEnvironmentVariable("SMART_CLOUD_MODE") ?? "";
+            IsCloudMode = vercelEnv == "1"
+                || cloudFlag == "1"
+                || cloudFlag.Equals("true", StringComparison.OrdinalIgnoreCase)
+                || CloudBlobStorage.IsConfigured;
+
+            string encSeed = (Environment.GetEnvironmentVariable("SMART_ENCRYPTION_KEY") ?? "").Trim();
+            string sessSeed = (Environment.GetEnvironmentVariable("SMART_SESSION_SECRET") ?? "").Trim();
+            string blobSeed = (Environment.GetEnvironmentVariable("BLOB_READ_WRITE_TOKEN") ?? "").Trim();
+
+            using (var sha = SHA256.Create())
+            {
+                string keyMat = !string.IsNullOrEmpty(encSeed) ? encSeed : (!string.IsNullOrEmpty(sessSeed) ? sessSeed : (!string.IsNullOrEmpty(blobSeed) ? blobSeed : "SmartMarketplace-Local-Fallback-Key-2026"));
+                _cloudKeyBytes = sha.ComputeHash(Encoding.UTF8.GetBytes("enc:" + keyMat));
+
+                string sessMat = !string.IsNullOrEmpty(sessSeed) ? sessSeed : (!string.IsNullOrEmpty(encSeed) ? encSeed : (!string.IsNullOrEmpty(blobSeed) ? blobSeed : ""));
+                _cloudSessionKeyBytes = !string.IsNullOrEmpty(sessMat) ? sha.ComputeHash(Encoding.UTF8.GetBytes("sess:" + sessMat)) : null;
+            }
+
+            if (IsCloudMode && _cloudSessionKeyBytes != null)
+            {
+                SessionToken = ComputeHmacHex(_cloudSessionKeyBytes, "smart-session-token-v1");
+                RemoteAuthCookieToken = ComputeHmacHex(_cloudSessionKeyBytes, "smart-remote-cookie-default-v1");
+            }
+            else
+            {
+                SessionToken = GenerateSecureToken(32);
+                RemoteAuthCookieToken = GenerateSecureToken(32);
+            }
+        }
+
+        private static string ComputeHmacHex(byte[] key, string message)
+        {
+            using (var hmac = new HMACSHA256(key))
+            {
+                byte[] hash = hmac.ComputeHash(Encoding.UTF8.GetBytes(message ?? ""));
+                return BitConverter.ToString(hash).Replace("-", "").ToLowerInvariant();
+            }
+        }
+
+        public static string GetExpectedRemoteCookieToken(string currentPin)
+        {
+            if (IsCloudMode && _cloudSessionKeyBytes != null && !string.IsNullOrWhiteSpace(currentPin))
+            {
+                return ComputeHmacHex(_cloudSessionKeyBytes, "pin-auth-v1:" + currentPin.Trim());
+            }
+            return RemoteAuthCookieToken;
         }
 
         public static void RotateRemoteCookieToken()
@@ -85,7 +135,30 @@ namespace SmartMarketplace
         public static string EncryptSecret(string plain)
         {
             if (string.IsNullOrWhiteSpace(plain)) return "";
-            if (plain.StartsWith(EncryptedPrefix)) return plain;
+            if (plain.StartsWith(EncryptedPrefix) || plain.StartsWith(AesEncryptedPrefix)) return plain;
+#if NET8_0_OR_GREATER
+            try
+            {
+                byte[] plainBytes = Encoding.UTF8.GetBytes(plain);
+                byte[] nonce = new byte[12];
+                RandomNumberGenerator.Fill(nonce);
+                byte[] cipher = new byte[plainBytes.Length];
+                byte[] tag = new byte[16];
+                using (var aes = new AesGcm(_cloudKeyBytes, 16))
+                {
+                    aes.Encrypt(nonce, plainBytes, cipher, tag);
+                }
+                byte[] combined = new byte[nonce.Length + tag.Length + cipher.Length];
+                Buffer.BlockCopy(nonce, 0, combined, 0, nonce.Length);
+                Buffer.BlockCopy(tag, 0, combined, nonce.Length, tag.Length);
+                Buffer.BlockCopy(cipher, 0, combined, nonce.Length + tag.Length, cipher.Length);
+                return AesEncryptedPrefix + Convert.ToBase64String(combined);
+            }
+            catch
+            {
+                return plain;
+            }
+#else
             try
             {
                 byte[] data = Encoding.UTF8.GetBytes(plain);
@@ -97,12 +170,44 @@ namespace SmartMarketplace
                 // Fallback if DPAPI unavailable in restricted profile
                 return plain;
             }
+#endif
         }
 
         public static string DecryptSecret(string stored)
         {
             if (string.IsNullOrWhiteSpace(stored)) return "";
+            if (stored.StartsWith(AesEncryptedPrefix))
+            {
+#if NET8_0_OR_GREATER
+                try
+                {
+                    byte[] combined = Convert.FromBase64String(stored.Substring(AesEncryptedPrefix.Length));
+                    if (combined.Length < 28) return "";
+                    byte[] nonce = new byte[12];
+                    byte[] tag = new byte[16];
+                    byte[] cipher = new byte[combined.Length - 28];
+                    Buffer.BlockCopy(combined, 0, nonce, 0, 12);
+                    Buffer.BlockCopy(combined, 12, tag, 0, 16);
+                    Buffer.BlockCopy(combined, 28, cipher, 0, cipher.Length);
+                    byte[] plainBytes = new byte[cipher.Length];
+                    using (var aes = new AesGcm(_cloudKeyBytes, 16))
+                    {
+                        aes.Decrypt(nonce, cipher, tag, plainBytes);
+                    }
+                    return Encoding.UTF8.GetString(plainBytes);
+                }
+                catch
+                {
+                    return "";
+                }
+#else
+                return "";
+#endif
+            }
             if (!stored.StartsWith(EncryptedPrefix)) return stored;
+#if NET8_0_OR_GREATER
+            return "";
+#else
             try
             {
                 byte[] protectedBytes = Convert.FromBase64String(stored.Substring(EncryptedPrefix.Length));
@@ -113,6 +218,7 @@ namespace SmartMarketplace
             {
                 return "";
             }
+#endif
         }
 
         public static void EncryptDatabaseSecrets(AppDatabase db)
@@ -238,6 +344,7 @@ namespace SmartMarketplace
 
         public static bool IsTunnelRequest(Dictionary<string, string> headers)
         {
+            if (IsCloudMode) return true;
             if (headers == null) return false;
             if (headers.ContainsKey("CF-Connecting-IP") || headers.ContainsKey("Cf-Ray")) return true;
             string activeHost = ActiveTunnelHost;
@@ -249,9 +356,10 @@ namespace SmartMarketplace
             return false;
         }
 
-        public static bool HasValidRemoteCookie(Dictionary<string, string> headers)
+        public static bool HasValidRemoteCookie(Dictionary<string, string> headers, string currentPin = null)
         {
             if (headers == null || !headers.ContainsKey("Cookie")) return false;
+            string expected = GetExpectedRemoteCookieToken(currentPin);
             string raw = headers["Cookie"] ?? "";
             foreach (var part in raw.Split(';'))
             {
@@ -259,7 +367,41 @@ namespace SmartMarketplace
                 if (p.StartsWith("smart_remote_auth=", StringComparison.OrdinalIgnoreCase))
                 {
                     string val = p.Substring("smart_remote_auth=".Length).Trim().Trim('"');
-                    if (FixedTimeEquals(val, RemoteAuthCookieToken)) return true;
+                    if (FixedTimeEquals(val, expected)) return true;
+                }
+            }
+            return false;
+        }
+
+        public static bool IsAllowedCloudHost(string hostOnly)
+        {
+            if (string.IsNullOrWhiteSpace(hostOnly)) return false;
+            string h = hostOnly.Trim().ToLowerInvariant();
+            int colon = h.IndexOf(':');
+            if (colon > 0) h = h.Substring(0, colon);
+
+            if (h == "localhost" || h == "127.0.0.1") return true;
+            if (h.EndsWith(".vercel.app")) return true;
+
+            string[] envHosts =
+            {
+                Environment.GetEnvironmentVariable("VERCEL_URL") ?? "",
+                Environment.GetEnvironmentVariable("VERCEL_BRANCH_URL") ?? "",
+                Environment.GetEnvironmentVariable("VERCEL_PROJECT_PRODUCTION_URL") ?? ""
+            };
+            foreach (var eh in envHosts)
+            {
+                string clean = eh.Trim().ToLowerInvariant().Replace("https://", "").Replace("http://", "").TrimEnd('/');
+                if (!string.IsNullOrEmpty(clean) && h == clean) return true;
+            }
+
+            string extra = Environment.GetEnvironmentVariable("SMART_ALLOWED_HOSTS") ?? "";
+            if (!string.IsNullOrWhiteSpace(extra))
+            {
+                foreach (var item in extra.Split(new[] { ',', ';', ' ' }, StringSplitOptions.RemoveEmptyEntries))
+                {
+                    string clean = item.Trim().ToLowerInvariant().Replace("https://", "").Replace("http://", "").TrimEnd('/');
+                    if (!string.IsNullOrEmpty(clean) && h == clean) return true;
                 }
             }
             return false;
@@ -269,6 +411,8 @@ namespace SmartMarketplace
         {
             if (string.IsNullOrWhiteSpace(host)) return false;
             string h = host.Trim().ToLowerInvariant();
+            if (IsCloudMode && IsAllowedCloudHost(h)) return true;
+
             if (h == ("localhost:" + port)
                 || h == ("127.0.0.1:" + port)
                 || h == "[::1]:" + port
@@ -301,6 +445,18 @@ namespace SmartMarketplace
                 {
                     bool allowed = origin == ("http://localhost:" + port)
                         || origin == ("http://127.0.0.1:" + port);
+
+                    if (!allowed && IsCloudMode)
+                    {
+                        Uri parsedOrigin;
+                        if (Uri.TryCreate(origin, UriKind.Absolute, out parsedOrigin)
+                            && (parsedOrigin.Scheme == Uri.UriSchemeHttps || parsedOrigin.Scheme == Uri.UriSchemeHttp)
+                            && IsAllowedCloudHost(parsedOrigin.Host))
+                        {
+                            allowed = true;
+                        }
+                    }
+
                     string tunnelHost = ActiveTunnelHost;
                     if (!allowed && !string.IsNullOrEmpty(tunnelHost))
                     {

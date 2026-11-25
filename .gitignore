@@ -4,6 +4,11 @@ data/
 *.sqlite
 
 # Compiled binaries & temporary build outputs (auto-built by Smart.bat / build.bat)
+bin/
+obj/
+.vercel/
+.env
+.env.local
 SmartServer.exe
 SmartServer_new.exe
 SmartServer_update.exe

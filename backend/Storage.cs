@@ -2,15 +2,36 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Text;
+#if NET8_0_OR_GREATER
+using Newtonsoft.Json;
+using Newtonsoft.Json.Linq;
+#else
 using System.Web.Script.Serialization;
+#endif
 
 namespace SmartMarketplace
 {
     public static class Storage
     {
+        private const string CloudDbBlobPath = "smart/smart_db.json";
+        private const string CloudUploadsPrefix = "smart/uploads/";
+
         private static readonly object _lock = new object();
+#if NET8_0_OR_GREATER
+        private static readonly JsonSerializerSettings _jsonSettings = new JsonSerializerSettings
+        {
+            NullValueHandling = NullValueHandling.Include,
+            ReferenceLoopHandling = ReferenceLoopHandling.Ignore
+        };
+#else
         private static readonly JavaScriptSerializer _json = new JavaScriptSerializer { MaxJsonLength = int.MaxValue, RecursionLimit = 200 };
+#endif
         private static long _dataVersionCounter = DateTime.UtcNow.Ticks;
+        private static string _lastCloudEtag = "";
+        private static DateTime _lastEtagCheckUtc = DateTime.MinValue;
+        private static string _cachedAccessPin = "";
+        private static DateTime _lastPinRefreshUtc = DateTime.MinValue;
+
         public static string DataDir { get; private set; }
         public static string UploadsDir { get; private set; }
         public static string DbPath { get; private set; }
@@ -18,18 +39,81 @@ namespace SmartMarketplace
 
         public static string GetDataVersion()
         {
+            if (CloudBlobStorage.IsConfigured)
+            {
+                lock (_lock)
+                {
+                    if ((DateTime.UtcNow - _lastEtagCheckUtc).TotalSeconds >= 2.0)
+                    {
+                        _lastEtagCheckUtc = DateTime.UtcNow;
+                        string etag = CloudBlobStorage.HeadEtag(CloudDbBlobPath);
+                        if (!string.IsNullOrEmpty(etag)) _lastCloudEtag = etag;
+                    }
+                    if (!string.IsNullOrEmpty(_lastCloudEtag))
+                        return _lastCloudEtag.Trim('"');
+                }
+            }
             return System.Threading.Interlocked.Read(ref _dataVersionCounter).ToString("x");
+        }
+
+        public static string GetCachedAccessPin(bool forceRefresh = false)
+        {
+            lock (_lock)
+            {
+                if (!forceRefresh && !string.IsNullOrEmpty(_cachedAccessPin) && (DateTime.UtcNow - _lastPinRefreshUtc).TotalSeconds < 15)
+                {
+                    return _cachedAccessPin;
+                }
+            }
+            var db = Load();
+            return db.RemoteConfig != null ? (db.RemoteConfig.AccessPin ?? "") : "";
         }
 
         public static void Initialize(string rootDir)
         {
-            DataDir = Path.Combine(rootDir, "data");
+            if (Security.IsCloudMode)
+            {
+                DataDir = Path.Combine(Path.GetTempPath(), "smart_data");
+            }
+            else
+            {
+                DataDir = Path.Combine(rootDir, "data");
+            }
             UploadsDir = Path.Combine(DataDir, "uploads");
             DbPath = Path.Combine(DataDir, "smart_db.json");
             BackupPath = Path.Combine(DataDir, "smart_db.backup.json");
 
             if (!Directory.Exists(DataDir)) Directory.CreateDirectory(DataDir);
             if (!Directory.Exists(UploadsDir)) Directory.CreateDirectory(UploadsDir);
+
+            if (CloudBlobStorage.IsConfigured)
+            {
+                string etag;
+                string cloudRaw = CloudBlobStorage.GetText(CloudDbBlobPath, true, out etag);
+                if (!string.IsNullOrWhiteSpace(cloudRaw))
+                {
+                    var cloudDb = TryDeserializeDb(cloudRaw);
+                    if (cloudDb != null)
+                    {
+                        EnsureDefaults(cloudDb);
+                        Security.DecryptDatabaseSecrets(cloudDb);
+                        lock (_lock)
+                        {
+                            if (!string.IsNullOrEmpty(etag)) _lastCloudEtag = etag;
+                            _cachedAccessPin = cloudDb.RemoteConfig.AccessPin;
+                            _lastPinRefreshUtc = DateTime.UtcNow;
+                        }
+                        try { File.WriteAllText(DbPath, cloudRaw, new UTF8Encoding(false)); } catch { }
+                        Console.WriteLine("[Smart] Bulut veritabanı (Vercel Private Blob) başarıyla yüklendi.");
+                        return;
+                    }
+                }
+
+                var initDb = CreateInitialDatabase();
+                Save(initDb);
+                Console.WriteLine("[Smart] Bulut veritabanı (Vercel Private Blob) ilk kez oluşturuldu.");
+                return;
+            }
 
             if (!File.Exists(DbPath))
             {
@@ -64,7 +148,28 @@ namespace SmartMarketplace
         {
             lock (_lock)
             {
-                AppDatabase db = TryReadFile(DbPath);
+                AppDatabase db = null;
+
+                if (CloudBlobStorage.IsConfigured)
+                {
+                    string etag;
+                    string cloudRaw = CloudBlobStorage.GetText(CloudDbBlobPath, true, out etag);
+                    if (!string.IsNullOrWhiteSpace(cloudRaw))
+                    {
+                        db = TryDeserializeDb(cloudRaw);
+                        if (db != null)
+                        {
+                            if (!string.IsNullOrEmpty(etag))
+                            {
+                                _lastCloudEtag = etag;
+                                _lastEtagCheckUtc = DateTime.UtcNow;
+                            }
+                            try { File.WriteAllText(DbPath, cloudRaw, new UTF8Encoding(false)); } catch { }
+                        }
+                    }
+                }
+
+                if (db == null) db = TryReadFile(DbPath);
                 if (db == null && File.Exists(BackupPath))
                 {
                     db = TryReadFile(BackupPath);
@@ -78,7 +183,22 @@ namespace SmartMarketplace
 
                 EnsureDefaults(db);
                 Security.DecryptDatabaseSecrets(db);
+                _cachedAccessPin = db.RemoteConfig.AccessPin;
+                _lastPinRefreshUtc = DateTime.UtcNow;
                 return db;
+            }
+        }
+
+        private static AppDatabase TryDeserializeDb(string raw)
+        {
+            try
+            {
+                if (string.IsNullOrWhiteSpace(raw)) return null;
+                return Deserialize<AppDatabase>(raw);
+            }
+            catch
+            {
+                return null;
             }
         }
 
@@ -88,8 +208,7 @@ namespace SmartMarketplace
             {
                 if (!File.Exists(path)) return null;
                 string raw = File.ReadAllText(path, Encoding.UTF8);
-                if (string.IsNullOrWhiteSpace(raw)) return null;
-                return _json.Deserialize<AppDatabase>(raw);
+                return TryDeserializeDb(raw);
             }
             catch
             {
@@ -113,7 +232,7 @@ namespace SmartMarketplace
                 var db = Load();
                 // Strip raw secrets from exported backup JSON so sharing a backup never exposes API keys
                 var safeClone = Security.CloneWithMaskedSecrets(db, true);
-                return _json.Serialize(safeClone);
+                return Serialize(safeClone);
             }
         }
 
@@ -122,7 +241,7 @@ namespace SmartMarketplace
             lock (_lock)
             {
                 var current = Load();
-                var imported = _json.Deserialize<AppDatabase>(rawJson);
+                var imported = Deserialize<AppDatabase>(rawJson);
                 if (imported == null) throw new Exception("Geçersiz yedek dosyası formatı.");
                 EnsureDefaults(imported);
                 Security.SanitizeImportedDatabase(imported);
@@ -165,11 +284,11 @@ namespace SmartMarketplace
                 db.Logs = db.Logs.GetRange(0, 300);
             }
 
-            // Serialize an encrypted copy so in-memory object stays decrypted while disk is 100% DPAPI-encrypted
-            var diskCopy = _json.Deserialize<AppDatabase>(_json.Serialize(db));
+            // Serialize an encrypted copy so in-memory object stays decrypted while disk/cloud is 100% encrypted
+            var diskCopy = Deserialize<AppDatabase>(Serialize(db));
             Security.EncryptDatabaseSecrets(diskCopy);
 
-            string json = _json.Serialize(diskCopy);
+            string json = Serialize(diskCopy);
             string tmp = DbPath + ".tmp";
             File.WriteAllText(tmp, json, new UTF8Encoding(false));
 
@@ -179,6 +298,20 @@ namespace SmartMarketplace
                 File.Delete(DbPath);
             }
             File.Move(tmp, DbPath);
+
+            _cachedAccessPin = db.RemoteConfig != null ? (db.RemoteConfig.AccessPin ?? "") : "";
+            _lastPinRefreshUtc = DateTime.UtcNow;
+
+            if (CloudBlobStorage.IsConfigured)
+            {
+                string blobErr;
+                if (CloudBlobStorage.PutText(CloudDbBlobPath, json, "application/json; charset=utf-8", out blobErr))
+                {
+                    _lastCloudEtag = DateTime.UtcNow.Ticks.ToString("x");
+                    _lastEtagCheckUtc = DateTime.UtcNow;
+                }
+            }
+
             System.Threading.Interlocked.Increment(ref _dataVersionCounter);
         }
 
@@ -236,24 +369,118 @@ namespace SmartMarketplace
                 throw new Exception("Güvenli dosya yolu oluşturulamadı.");
 
             File.WriteAllBytes(fullPath, bytes);
+
+            if (CloudBlobStorage.IsConfigured)
+            {
+                string mime = safeExt == ".png" ? "image/png" : (safeExt == ".webp" ? "image/webp" : "image/jpeg");
+                string blobErr;
+                CloudBlobStorage.PutBytes(CloudUploadsPrefix + safeName, bytes, mime, 31536000, out blobErr);
+            }
+
             return "/uploads/" + safeName;
+        }
+
+        /// <summary>
+        /// Ensures an uploaded image file exists in UploadsDir locally.
+        /// In Vercel cloud mode, transparently restores the file from Private Blob after cold starts.
+        /// </summary>
+        public static bool EnsureUploadFileLocal(string fileName, out string fullPath)
+        {
+            fullPath = null;
+            if (string.IsNullOrWhiteSpace(fileName) || fileName.Contains("/") || fileName.Contains("\\"))
+                return false;
+            if (!Security.TryResolveSafePath(UploadsDir, fileName, out fullPath))
+                return false;
+            if (File.Exists(fullPath))
+                return true;
+
+            if (CloudBlobStorage.IsConfigured)
+            {
+                string etag;
+                byte[] bytes = CloudBlobStorage.GetBytes(CloudUploadsPrefix + fileName, false, out etag);
+                if (bytes != null && bytes.Length > 0)
+                {
+                    try
+                    {
+                        if (!Directory.Exists(UploadsDir)) Directory.CreateDirectory(UploadsDir);
+                        File.WriteAllBytes(fullPath, bytes);
+                        return true;
+                    }
+                    catch { }
+                }
+            }
+            return false;
         }
 
         public static string Serialize(object obj)
         {
+#if NET8_0_OR_GREATER
+            return JsonConvert.SerializeObject(obj, _jsonSettings);
+#else
             return _json.Serialize(obj);
+#endif
         }
 
         public static T Deserialize<T>(string json)
         {
+#if NET8_0_OR_GREATER
+            if (string.IsNullOrWhiteSpace(json)) return default(T);
+            Type t = typeof(T);
+            if (t == typeof(Dictionary<string, object>) || t == typeof(object) || t == typeof(object[]))
+            {
+                var token = JToken.Parse(json);
+                object converted = ConvertJToken(token);
+                if (converted == null) return default(T);
+                return (T)converted;
+            }
+            return JsonConvert.DeserializeObject<T>(json, _jsonSettings);
+#else
             return _json.Deserialize<T>(json);
+#endif
         }
+
+#if NET8_0_OR_GREATER
+        private static object ConvertJToken(JToken token)
+        {
+            if (token == null || token.Type == JTokenType.Null || token.Type == JTokenType.Undefined)
+                return null;
+            if (token is JObject obj)
+            {
+                var dict = new Dictionary<string, object>();
+                foreach (var prop in obj.Properties())
+                {
+                    dict[prop.Name] = ConvertJToken(prop.Value);
+                }
+                return dict;
+            }
+            if (token is JArray arr)
+            {
+                var list = new object[arr.Count];
+                for (int i = 0; i < arr.Count; i++)
+                {
+                    list[i] = ConvertJToken(arr[i]);
+                }
+                return list;
+            }
+            if (token is JValue val)
+            {
+                object v = val.Value;
+                if (v is long l && l >= int.MinValue && l <= int.MaxValue)
+                    return (int)l;
+                return v;
+            }
+            return token.ToString();
+        }
+#endif
 
         private static AppDatabase CreateInitialDatabase()
         {
             var db = new AppDatabase();
             EnsureDefaults(db);
-            AddLog(db, "system", "info", "Smart", "Smart Pazaryeri Otomasyon Sistemi güvenlik kalkanı ile başlatıldı.", "API anahtarları Windows DPAPI ile şifrelenir; tüm ayarlarınız ve ürünleriniz kalıcı saklanır.");
+            string encMode = Security.IsCloudMode
+                ? "API anahtarları AES-256-GCM ile şifrelenir; tüm ayarlarınız ve ürünleriniz Vercel Private Blob üzerinde kalıcı saklanır."
+                : "API anahtarları Windows DPAPI ile şifrelenir; tüm ayarlarınız ve ürünleriniz kalıcı saklanır.";
+            AddLog(db, "system", "info", "Smart", "Smart Pazaryeri Otomasyon Sistemi güvenlik kalkanı ile başlatıldı.", encMode);
             return db;
         }
 
@@ -262,7 +489,11 @@ namespace SmartMarketplace
             if (db.AiConfig == null) db.AiConfig = new AiSettings();
             if (db.SyncConfig == null) db.SyncConfig = new SyncSettings();
             if (db.RemoteConfig == null) db.RemoteConfig = new RemoteAccessSettings();
-            if (string.IsNullOrWhiteSpace(db.RemoteConfig.AccessPin)) db.RemoteConfig.AccessPin = Security.Generate6DigitPin();
+            if (string.IsNullOrWhiteSpace(db.RemoteConfig.AccessPin))
+            {
+                string envPin = System.Text.RegularExpressions.Regex.Replace(Environment.GetEnvironmentVariable("SMART_ACCESS_PIN") ?? "", @"\D+", "");
+                db.RemoteConfig.AccessPin = envPin.Length == 6 ? envPin : Security.Generate6DigitPin();
+            }
             if (db.Draft == null) db.Draft = new DraftWorkspace();
             if (db.Draft.UploadedImages == null) db.Draft.UploadedImages = new List<string>();
             if (db.Draft.SelectedTargetMps == null) db.Draft.SelectedTargetMps = new List<string>();

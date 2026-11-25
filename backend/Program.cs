@@ -40,20 +40,33 @@ namespace SmartMarketplace
         private static volatile bool _restartingForUpdate = false;
         private static bool _isSupervised = false;
         private static TcpListener _listener;
-        private static readonly string _serverInstanceId = Security.GenerateSecureToken(8);
+        private static readonly string _serverInstanceId = Security.IsCloudMode
+            ? ("cloud-" + (Environment.GetEnvironmentVariable("VERCEL_DEPLOYMENT_ID") ?? "v3.8"))
+            : Security.GenerateSecureToken(8);
 
         static void Main(string[] args)
         {
             Console.OutputEncoding = Encoding.UTF8;
             ServicePointManager.SecurityProtocol = SecurityProtocolType.Tls12;
-            bool openBrowser = true;
+            bool openBrowser = !Security.IsCloudMode;
+
+            string envPort = Environment.GetEnvironmentVariable("PORT");
+            int parsedEnvPort;
+            if (!string.IsNullOrWhiteSpace(envPort) && int.TryParse(envPort.Trim(), out parsedEnvPort) && parsedEnvPort >= 1 && parsedEnvPort <= 65535)
+            {
+                _port = parsedEnvPort;
+            }
+            else if (Security.IsCloudMode)
+            {
+                _port = 80;
+            }
 
             foreach (var a in args)
             {
                 if (a.StartsWith("--port="))
                 {
                     int p;
-                    if (int.TryParse(a.Substring(7), out p) && p >= 1024 && p <= 65535) _port = p;
+                    if (int.TryParse(a.Substring(7), out p) && p >= 1 && p <= 65535) _port = p;
                 }
                 if (a == "--no-browser") openBrowser = false;
                 if (a == "--supervised") _isSupervised = true;
@@ -65,35 +78,47 @@ namespace SmartMarketplace
                 var parent = Directory.GetParent(_rootDir.TrimEnd('\\', '/'));
                 if (parent != null && Directory.Exists(Path.Combine(parent.FullName, "frontend")))
                     _rootDir = parent.FullName;
+                else if (Directory.Exists(Path.Combine(Directory.GetCurrentDirectory(), "frontend")))
+                    _rootDir = Directory.GetCurrentDirectory();
             }
             _frontendDir = Path.Combine(_rootDir, "frontend");
             Storage.Initialize(_rootDir);
 
-            // Background stock sync check every 60 seconds
-            _syncTimer = new Timer(BackgroundSyncTick, null, 60000, 60000);
-            // Hot-update watcher: checks every 1.5s for SmartServer_update.exe
-            _updateTimer = new Timer(CheckForHotUpdate, null, 1500, 1500);
-            // Pre-warm Trendyol official category tree & auto-resume remote tunnel if user enabled it
-            ThreadPool.QueueUserWorkItem(_ =>
+            if (!Security.IsCloudMode)
             {
-                try
+                // Background stock sync check every 60 seconds
+                _syncTimer = new Timer(BackgroundSyncTick, null, 60000, 60000);
+                // Hot-update watcher: checks every 1.5s for SmartServer_update.exe
+                _updateTimer = new Timer(CheckForHotUpdate, null, 1500, 1500);
+                // Pre-warm Trendyol official category tree & auto-resume remote tunnel if user enabled it
+                ThreadPool.QueueUserWorkItem(_ =>
                 {
-                    var dbInit = Storage.Load();
-                    if (dbInit.RemoteConfig != null && dbInit.RemoteConfig.AutoStartTunnel)
+                    try
                     {
-                        string tUrl, tErr;
-                        if (TunnelService.StartTunnel(_port, out tUrl, out tErr))
-                            Console.WriteLine("  Her Yerden: " + tUrl + " (PIN Korumalı)");
+                        var dbInit = Storage.Load();
+                        if (dbInit.RemoteConfig != null && dbInit.RemoteConfig.AutoStartTunnel)
+                        {
+                            string tUrl, tErr;
+                            if (TunnelService.StartTunnel(_port, out tUrl, out tErr))
+                                Console.WriteLine("  Her Yerden: " + tUrl + " (PIN Korumalı)");
+                        }
+                        var tyCfg = dbInit.Marketplaces.Find(m => m.Id == "trendyol");
+                        if (tyCfg != null && !tyCfg.SimulationMode && MarketplaceConnectors.HasRequiredCredentials(tyCfg))
+                        {
+                            string warmErr;
+                            TrendyolCategoryEngine.EnsureCategoryTreeLoaded(tyCfg, false, out warmErr);
+                        }
                     }
-                    var tyCfg = dbInit.Marketplaces.Find(m => m.Id == "trendyol");
-                    if (tyCfg != null && !tyCfg.SimulationMode && MarketplaceConnectors.HasRequiredCredentials(tyCfg))
-                    {
-                        string warmErr;
-                        TrendyolCategoryEngine.EnsureCategoryTreeLoaded(tyCfg, false, out warmErr);
-                    }
-                }
-                catch { }
-            });
+                    catch { }
+                });
+            }
+            else
+            {
+                AppDomain.CurrentDomain.ProcessExit += (s, e) =>
+                {
+                    try { if (_listener != null) _listener.Stop(); } catch { }
+                };
+            }
 
             try
             {
@@ -213,9 +238,9 @@ namespace SmartMarketplace
             {
                 try
                 {
-                    // 0. Network Boundary Guard: ONLY allow localhost or same private Wi-Fi LAN (RFC1918) — reject public internet IPs!
+                    // 0. Network Boundary Guard: locally ONLY allow localhost or private Wi-Fi LAN (RFC1918)
                     var remoteEp = client.Client.RemoteEndPoint as IPEndPoint;
-                    if (remoteEp == null || !Security.IsPrivateLanIp(remoteEp.Address))
+                    if (!Security.IsCloudMode && (remoteEp == null || !Security.IsPrivateLanIp(remoteEp.Address)))
                     {
                         return;
                     }
@@ -272,9 +297,50 @@ namespace SmartMarketplace
                         string path = rawPath.TrimEnd('/');
                         if (string.IsNullOrEmpty(path)) path = "/";
 
-                        // 3. Remote HTTPS Tunnel PIN Gate (protects remote access from any network with 6-digit PIN + HttpOnly cookie)
+                        if (path == "/api/health" && (req.Method == "GET" || req.Method == "HEAD"))
+                        {
+                            WriteJson(stream, 200, new
+                            {
+                                ok = true,
+                                mode = Security.IsCloudMode ? "cloud" : "local",
+                                storage = CloudBlobStorage.IsConfigured ? "vercel-blob" : "local-disk",
+                                appVersion = "v3.8"
+                            });
+                            return;
+                        }
+
+                        if (path == "/api/internal/cron-sync" && (req.Method == "POST" || req.Method == "GET"))
+                        {
+                            string cronSecret = (Environment.GetEnvironmentVariable("CRON_SECRET") ?? "").Trim();
+                            string authHeader = req.Headers.ContainsKey("Authorization") ? (req.Headers["Authorization"] ?? "").Trim() : "";
+                            if (string.IsNullOrEmpty(cronSecret) || !Security.FixedTimeEquals(authHeader, "Bearer " + cronSecret))
+                            {
+                                WriteJson(stream, 401, new { ok = false, error = "Yetkisiz zamanlanmış görev isteği." });
+                                return;
+                            }
+                            var dbCron = Storage.Load();
+                            int syncedOps = 0;
+                            if (dbCron.SyncConfig != null && dbCron.SyncConfig.AutoSyncEnabled && dbCron.Products.Count > 0)
+                            {
+                                syncedOps = RunFullStockSync(dbCron, "Vercel Otomatik Zamanlayıcı");
+                            }
+                            WriteJson(stream, 200, new { ok = true, syncedOperations = syncedOps });
+                            return;
+                        }
+
+                        // 3. Remote HTTPS Tunnel / Cloud PIN Gate (protects remote access from any network with 6-digit PIN + HttpOnly cookie)
                         bool isTunnel = Security.IsTunnelRequest(req.Headers);
-                        bool remoteAuthed = !isTunnel || Security.HasValidRemoteCookie(req.Headers);
+                        bool remoteAuthed = !isTunnel;
+                        if (isTunnel)
+                        {
+                            string cachedPin = Storage.GetCachedAccessPin(false);
+                            remoteAuthed = Security.HasValidRemoteCookie(req.Headers, cachedPin);
+                            if (!remoteAuthed && Security.IsCloudMode && req.Headers.ContainsKey("Cookie") && (req.Headers["Cookie"] ?? "").Contains("smart_remote_auth="))
+                            {
+                                string freshPin = Storage.GetCachedAccessPin(true);
+                                remoteAuthed = Security.HasValidRemoteCookie(req.Headers, freshPin);
+                            }
+                        }
 
                         if (path == "/api/auth/pin" && req.Method == "POST")
                         {
@@ -329,11 +395,32 @@ namespace SmartMarketplace
                                 return;
                             }
                             var dbNet = Storage.Load();
+                            if (Security.IsCloudMode)
+                            {
+                                string reqHost = (host ?? "").Trim();
+                                if (string.IsNullOrEmpty(reqHost))
+                                    reqHost = (Environment.GetEnvironmentVariable("VERCEL_PROJECT_PRODUCTION_URL") ?? Environment.GetEnvironmentVariable("VERCEL_URL") ?? "").Trim();
+                                string cloudUrl = "https://" + reqHost.Replace("https://", "").Replace("http://", "").TrimEnd('/') + "/";
+                                WriteJson(stream, 200, new
+                                {
+                                    ok = true,
+                                    port = _port,
+                                    cloudMode = true,
+                                    localUrl = cloudUrl,
+                                    mobileUrls = new[] { cloudUrl },
+                                    tunnelActive = true,
+                                    tunnelUrl = cloudUrl,
+                                    accessPin = dbNet.RemoteConfig.AccessPin,
+                                    autoStartTunnel = true
+                                });
+                                return;
+                            }
                             var lanIps = Security.GetLocalLanIpv4Addresses();
                             WriteJson(stream, 200, new
                             {
                                 ok = true,
                                 port = _port,
+                                cloudMode = false,
                                 localUrl = "http://localhost:" + _port + "/",
                                 mobileUrls = lanIps.Select(ip => "http://" + ip + ":" + _port + "/").ToArray(),
                                 tunnelActive = TunnelService.IsActive,
@@ -349,6 +436,19 @@ namespace SmartMarketplace
                             if (!Security.IsValidSessionToken(req.Headers))
                             {
                                 WriteJson(stream, 403, new { ok = false, error = "Yetkisiz istek." });
+                                return;
+                            }
+                            if (Security.IsCloudMode)
+                            {
+                                var dbCloud = Storage.Load();
+                                string cloudUrl = "https://" + (host ?? "").Trim().TrimEnd('/') + "/";
+                                WriteJson(stream, 200, new
+                                {
+                                    ok = true,
+                                    tunnelActive = true,
+                                    tunnelUrl = cloudUrl,
+                                    accessPin = dbCloud.RemoteConfig.AccessPin
+                                });
                                 return;
                             }
                             string tUrl, tErr;
@@ -377,6 +477,11 @@ namespace SmartMarketplace
                             if (!Security.IsValidSessionToken(req.Headers))
                             {
                                 WriteJson(stream, 403, new { ok = false, error = "Yetkisiz istek." });
+                                return;
+                            }
+                            if (Security.IsCloudMode)
+                            {
+                                WriteJson(stream, 400, new { ok = false, error = "Bulut (Vercel) modunda HTTPS erişim her zaman aktiftir. Erişimi kısıtlamak için güvenlik PIN kodunu yenileyebilirsiniz." });
                                 return;
                             }
                             TunnelService.StopTunnel();
@@ -418,9 +523,9 @@ namespace SmartMarketplace
                         {
                             string fileName = path.Substring("/uploads/".Length);
                             string fullUploadPath;
-                            if (fileName.Contains("/") || !Security.TryResolveSafePath(Storage.UploadsDir, fileName, out fullUploadPath))
+                            if (!Storage.EnsureUploadFileLocal(fileName, out fullUploadPath))
                             {
-                                WriteJson(stream, 403, new { ok = false, error = "Erişim engellendi." });
+                                WriteResponse(stream, 404, "text/plain; charset=utf-8", Encoding.UTF8.GetBytes("Bulunamadı"));
                                 return;
                             }
                             ServeFile(fullUploadPath, stream, true);
@@ -476,7 +581,7 @@ namespace SmartMarketplace
             byte[] allInitial = headerBytes.ToArray();
             string headerText = Encoding.ASCII.GetString(allInitial, 0, headerEnd);
             var lines = headerText.Split(new[] { "\r\n" }, StringSplitOptions.None);
-            if (lines.Length == 0 || lines.Length > 100) return null;
+            if (lines.Length == 0 || lines.Length > 200) return null;
 
             var parts = lines[0].Split(' ');
             if (parts.Length < 2) return null;
@@ -1358,7 +1463,8 @@ namespace SmartMarketplace
                     WriteJson(stream, 401, new { ok = false, error = "Güvenlik PIN kodu hatalı. Bilgisayarınızdaki Smart > Mobil penceresindeki 6 haneli PIN kodunu girin." });
                     return;
                 }
-                string cookie = "smart_remote_auth=" + Security.RemoteAuthCookieToken + "; Path=/; HttpOnly; SameSite=Lax; Max-Age=86400" + (isHttps ? "; Secure" : "");
+                string cookieVal = Security.GetExpectedRemoteCookieToken(db.RemoteConfig.AccessPin);
+                string cookie = "smart_remote_auth=" + cookieVal + "; Path=/; HttpOnly; SameSite=Lax; Max-Age=2592000" + (isHttps ? "; Secure" : "");
                 if (isForm)
                 {
                     WriteResponse(stream, 303, "text/plain; charset=utf-8", new byte[0], cookie, "/?ok=" + DateTime.UtcNow.Ticks);

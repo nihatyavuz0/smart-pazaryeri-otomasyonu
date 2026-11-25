@@ -1,8 +1,16 @@
 using System;
 using System.Collections.Generic;
+#if NET8_0_OR_GREATER
+using SixLabors.ImageSharp;
+using SixLabors.ImageSharp.Formats.Jpeg;
+using SixLabors.ImageSharp.Metadata;
+using SixLabors.ImageSharp.PixelFormats;
+using SixLabors.ImageSharp.Processing;
+#else
 using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.Drawing.Imaging;
+#endif
 using System.IO;
 using System.Linq;
 using System.Net;
@@ -71,7 +79,7 @@ namespace SmartMarketplace
 
                     string fileName = Path.GetFileName(trimmed);
                     string fullPath;
-                    if (!Security.TryResolveSafePath(Storage.UploadsDir, fileName, out fullPath) || !File.Exists(fullPath))
+                    if (!Storage.EnsureUploadFileLocal(fileName, out fullPath))
                     {
                         lastError = "Yerel görsel dosyası bulunamadı: " + fileName;
                         continue;
@@ -113,6 +121,46 @@ namespace SmartMarketplace
                 }
 
                 byte[] rawBytes = File.ReadAllBytes(sourcePath);
+#if NET8_0_OR_GREATER
+                using (var srcImg = Image.Load<Rgb24>(rawBytes))
+                {
+                    srcImg.Mutate(x => x.AutoOrient());
+
+                    int sw = srcImg.Width;
+                    int sh = srcImg.Height;
+                    if (sw <= 0 || sh <= 0) return sourcePath;
+
+                    const int canvasW = 1200;
+                    const int canvasH = 1800;
+                    const int pad = 36;
+                    double scale = Math.Min((double)(canvasW - pad * 2) / sw, (double)(canvasH - pad * 2) / sh);
+                    int dw = Math.Max(1, (int)Math.Round(sw * scale));
+                    int dh = Math.Max(1, (int)Math.Round(sh * scale));
+                    int dx = (canvasW - dw) / 2;
+                    int dy = (canvasH - dh) / 2;
+
+                    srcImg.Mutate(x => x.Resize(new ResizeOptions
+                    {
+                        Size = new Size(dw, dh),
+                        Mode = ResizeMode.Stretch,
+                        Sampler = KnownResamplers.Bicubic
+                    }));
+
+                    using (var dst = new Image<Rgb24>(canvasW, canvasH, Color.White))
+                    {
+                        dst.Metadata.HorizontalResolution = 96;
+                        dst.Metadata.VerticalResolution = 96;
+                        dst.Metadata.ResolutionUnits = PixelResolutionUnit.PixelsPerInch;
+                        dst.Metadata.ExifProfile = null;
+                        dst.Mutate(x => x.DrawImage(srcImg, new Point(dx, dy), 1f));
+                        dst.Save(outPath, new JpegEncoder
+                        {
+                            Quality = 92,
+                            ColorType = JpegEncodingColor.YCbCrRatio420
+                        });
+                    }
+                }
+#else
                 using (var ms = new MemoryStream(rawBytes))
                 using (var srcImg = Image.FromStream(ms, true, true))
                 {
@@ -159,6 +207,7 @@ namespace SmartMarketplace
                         }
                     }
                 }
+#endif
                 outputIsJpg = HasJpegMagic(outPath);
                 return outPath;
             }
@@ -384,6 +433,7 @@ namespace SmartMarketplace
             }
         }
 
+#if !NET8_0_OR_GREATER
         private static void ApplyExifOrientation(Image img)
         {
             const int OrientationId = 0x0112;
@@ -406,6 +456,7 @@ namespace SmartMarketplace
             }
             catch { }
         }
+#endif
 
         private static string PostMultipart(
             string url,

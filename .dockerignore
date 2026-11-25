@@ -1,0 +1,12 @@
+.git
+.gitignore
+.vercel
+data/
+bin/
+obj/
+SmartServer.exe
+SmartServer_*.exe
+*.log
+README.md
+Smart.bat
+build.bat

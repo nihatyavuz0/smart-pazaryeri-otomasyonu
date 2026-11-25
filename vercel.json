@@ -1,0 +1,13 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "fluid": true,
+  "schedules": {
+    "auto-stock-sync": {
+      "schedule": "*/15 * * * *",
+      "timezone": "Europe/Istanbul",
+      "jitter": 15,
+      "path": "/api/internal/cron-sync",
+      "requestMethod": "POST"
+    }
+  }
+}

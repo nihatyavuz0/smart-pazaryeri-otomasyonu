@@ -19,6 +19,7 @@ del /f /q "%TMPEXE%" >nul 2>&1
     /reference:System.Security.dll ^
     /reference:System.Drawing.dll ^
     "%~dp0backend\Models.cs" ^
+    "%~dp0backend\CloudBlobStorage.cs" ^
     "%~dp0backend\Security.cs" ^
     "%~dp0backend\ComplianceGuard.cs" ^
     "%~dp0backend\ImageHostService.cs" ^

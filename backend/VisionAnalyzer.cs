@@ -1,8 +1,15 @@
 using System;
 using System.Collections.Generic;
+#if NET8_0_OR_GREATER
+using SixLabors.ImageSharp;
+using SixLabors.ImageSharp.Formats.Jpeg;
+using SixLabors.ImageSharp.PixelFormats;
+using SixLabors.ImageSharp.Processing;
+#else
 using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.Drawing.Imaging;
+#endif
 using System.Globalization;
 using System.IO;
 using System.Linq;
@@ -260,6 +267,78 @@ namespace SmartMarketplace
             try
             {
                 byte[] bytes = File.ReadAllBytes(filePath);
+#if NET8_0_OR_GREATER
+                using (var src = Image.Load<Rgb24>(bytes))
+                {
+                    src.Mutate(x => x.AutoOrient());
+                    int origW = src.Width;
+                    int origH = src.Height;
+                    using (var small = src.Clone(x => x.Resize(96, 96, KnownResamplers.Triangle)))
+                    {
+                        // Sample border average to detect background color (white/light studio bg)
+                        long bgR = 0, bgG = 0, bgB = 0; int bgN = 0;
+                        for (int i = 0; i < 96; i += 2)
+                        {
+                            var coords = new[] { (i, 2), (i, 93), (2, i), (93, i) };
+                            foreach (var pt in coords)
+                            {
+                                var c = small[pt.Item1, pt.Item2];
+                                bgR += c.R; bgG += c.G; bgB += c.B; bgN++;
+                            }
+                        }
+                        int avgBgR = bgN > 0 ? (int)(bgR / bgN) : 250;
+                        int avgBgG = bgN > 0 ? (int)(bgG / bgN) : 250;
+                        int avgBgB = bgN > 0 ? (int)(bgB / bgN) : 250;
+
+                        // Sample center 60% foreground pixels
+                        long fgR = 0, fgG = 0, fgB = 0; int fgN = 0;
+                        int brightHighlights = 0;
+                        int lowSatPixels = 0;
+                        int darkPixels = 0;
+
+                        for (int y = 18; y < 78; y += 2)
+                        {
+                            for (int x = 18; x < 78; x += 2)
+                            {
+                                var c = small[x, y];
+                                int diffBg = Math.Abs(c.R - avgBgR) + Math.Abs(c.G - avgBgG) + Math.Abs(c.B - avgBgB);
+                                if (diffBg < 32 && (c.R > 230 && c.G > 230 && c.B > 230)) continue;
+
+                                fgR += c.R; fgG += c.G; fgB += c.B; fgN++;
+                                float hue, sat, bri;
+                                RgbToHsl(c.R, c.G, c.B, out hue, out sat, out bri);
+                                if (sat < 0.16f) lowSatPixels++;
+                                if (bri > 0.80f && sat < 0.18f) brightHighlights++;
+                                if (bri < 0.22f) darkPixels++;
+                            }
+                        }
+
+                        if (fgN == 0) { fgR = avgBgR; fgG = avgBgG; fgB = avgBgB; fgN = 1; }
+                        int r = (int)(fgR / fgN);
+                        int gr = (int)(fgG / fgN);
+                        int b = (int)(fgB / fgN);
+                        colorHex = string.Format("#{0:X2}{1:X2}{2:X2}", r, gr, b);
+                        colorName = ClassifyTurkishColor(r, gr, b);
+
+                        double lowSatRatio = (double)lowSatPixels / fgN;
+                        double highlightRatio = (double)brightHighlights / fgN;
+                        double darkRatio = (double)darkPixels / fgN;
+
+                        if (lowSatRatio > 0.55 && highlightRatio > 0.08 && darkRatio > 0.08)
+                        {
+                            surfaceHint = "Paslanmaz Çelik / Metalik";
+                            features.Add("Parlak metalik yüzey yansıması tespit edildi");
+                        }
+                        else if (lowSatRatio > 0.70 && highlightRatio < 0.05)
+                        {
+                            features.Add("Mat ve sade yüzey dokusu tespit edildi");
+                        }
+
+                        features.Add("Görsel baskın renk tonu: " + colorName);
+                        features.Add(string.Format("Orijinal görsel çözünürlüğü: {0}×{1} px", origW, origH));
+                    }
+                }
+#else
                 using (var ms = new MemoryStream(bytes))
                 using (var src = Image.FromStream(ms, true, true))
                 using (var small = new Bitmap(96, 96, PixelFormat.Format24bppRgb))
@@ -331,17 +410,39 @@ namespace SmartMarketplace
                     features.Add("Görsel baskın renk tonu: " + colorName);
                     features.Add(string.Format("Orijinal görsel çözünürlüğü: {0}×{1} px", src.Width, src.Height));
                 }
+#endif
             }
             catch { }
             return features;
         }
 
+        private static void RgbToHsl(int r, int g, int b, out float h, out float s, out float l)
+        {
+            float rf = r / 255f;
+            float gf = g / 255f;
+            float bf = b / 255f;
+            float max = Math.Max(rf, Math.Max(gf, bf));
+            float min = Math.Min(rf, Math.Min(gf, bf));
+            float delta = max - min;
+            l = (max + min) / 2f;
+            if (delta < 0.00001f)
+            {
+                h = 0f;
+                s = 0f;
+                return;
+            }
+            s = l <= 0.5f ? (delta / (max + min)) : (delta / (2f - max - min));
+            if (max == rf) h = ((gf - bf) / delta) % 6f;
+            else if (max == gf) h = ((bf - rf) / delta) + 2f;
+            else h = ((rf - gf) / delta) + 4f;
+            h *= 60f;
+            if (h < 0f) h += 360f;
+        }
+
         private static string ClassifyTurkishColor(int r, int g, int b)
         {
-            var c = Color.FromArgb(r, g, b);
-            float h = c.GetHue();
-            float s = c.GetSaturation();
-            float l = c.GetBrightness();
+            float h, s, l;
+            RgbToHsl(r, g, b, out h, out s, out l);
 
             if (l < 0.17f) return "Siyah";
             if (l > 0.86f && s < 0.15f) return "Beyaz";
@@ -374,7 +475,7 @@ namespace SmartMarketplace
             {
                 if (string.IsNullOrWhiteSpace(img) || !img.StartsWith("/uploads/", StringComparison.OrdinalIgnoreCase)) continue;
                 string fullPath;
-                if (Security.TryResolveSafePath(Storage.UploadsDir, Path.GetFileName(img), out fullPath) && File.Exists(fullPath))
+                if (Storage.EnsureUploadFileLocal(Path.GetFileName(img), out fullPath))
                     paths.Add(fullPath);
             }
             return paths;
@@ -388,6 +489,26 @@ namespace SmartMarketplace
                 try
                 {
                     byte[] raw = File.ReadAllBytes(p);
+#if NET8_0_OR_GREATER
+                    using (var img = Image.Load<Rgb24>(raw))
+                    {
+                        img.Mutate(x => x.AutoOrient());
+                        int maxDim = Math.Max(img.Width, img.Height);
+                        double scale = maxDim > 768 ? 768.0 / maxDim : 1.0;
+                        int w = Math.Max(1, (int)Math.Round(img.Width * scale));
+                        int h = Math.Max(1, (int)Math.Round(img.Height * scale));
+                        img.Mutate(x => x.Resize(w, h, KnownResamplers.Bicubic));
+                        using (var bmp = new Image<Rgb24>(w, h, Color.White))
+                        {
+                            bmp.Mutate(x => x.DrawImage(img, new Point(0, 0), 1f));
+                            using (var outMs = new MemoryStream())
+                            {
+                                bmp.Save(outMs, new JpegEncoder { Quality = 85 });
+                                list.Add(Convert.ToBase64String(outMs.ToArray()));
+                            }
+                        }
+                    }
+#else
                     using (var ms = new MemoryStream(raw))
                     using (var img = Image.FromStream(ms, true, true))
                     {
@@ -408,6 +529,7 @@ namespace SmartMarketplace
                             }
                         }
                     }
+#endif
                 }
                 catch { }
             }
