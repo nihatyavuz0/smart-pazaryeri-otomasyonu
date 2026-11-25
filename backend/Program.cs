@@ -312,7 +312,7 @@ namespace SmartMarketplace
                             WriteJson(stream, 200, new
                             {
                                 ok = true,
-                                appVersion = "v3.7",
+                                appVersion = "v3.8",
                                 serverId = _serverInstanceId,
                                 frontendVersion = ComputeFrontendVersion(),
                                 dataVersion = Storage.GetDataVersion(),

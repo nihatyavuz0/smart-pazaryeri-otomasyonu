@@ -801,19 +801,33 @@ async function clearDraftExplicitly() {
 async function handleImageFiles(files) {
   if (!files || files.length === 0) return;
   for (const file of Array.from(files)) {
-    if (!['image/jpeg', 'image/png', 'image/webp'].includes(file.type)) {
-      toast('Güvenlik nedeniyle yalnızca JPG, PNG veya WEBP görseller yüklenebilir.', 'error');
+    const isImageMime = file.type && file.type.startsWith('image/');
+    const isImageExt = /\.(jpe?g|png|webp|avif|bmp|gif|jfif|heic)$/i.test(file.name || '');
+    if (!isImageMime && !isImageExt) {
+      toast('Yalnızca görsel dosyaları (JPG, PNG, WEBP, AVIF) yüklenebilir.', 'error');
       continue;
     }
-    if (file.size > 5 * 1024 * 1024) {
-      toast('Görsel boyutu en fazla 5 MB olabilir: ' + file.name, 'error');
+    if (file.size > 15 * 1024 * 1024) {
+      toast('Görsel boyutu en fazla 15 MB olabilir: ' + file.name, 'error');
       continue;
     }
-    const base64 = await readFileAsDataURL(file);
+    let uploadDataUrl = '';
+    let uploadName = (file.name || 'urun.jpg').replace(/\.[^.]+$/, '') + '.jpg';
+    try {
+      // Convert ANY image (WEBP, transparent PNG, AVIF, high-res phone photo) into exact 1200x1800 white-bg sRGB baseline JPEG
+      uploadDataUrl = await normalizeFileToMarketplaceJpgDataUrl(file);
+    } catch {
+      if (!['image/jpeg', 'image/png', 'image/webp'].includes(file.type) || file.size > 5 * 1024 * 1024) {
+        toast('Bu görsel formatı tarayıcıda JPEG\'e dönüştürülemedi: ' + file.name, 'error');
+        continue;
+      }
+      uploadDataUrl = await readFileAsDataURL(file);
+      uploadName = file.name;
+    }
     try {
       const resp = await apiFetch('/api/upload', {
         method: 'POST',
-        body: JSON.stringify({ fileName: file.name, data: base64 })
+        body: JSON.stringify({ fileName: uploadName, data: uploadDataUrl })
       });
       state.uploadedImages.push(resp.url);
       state.uploadedFileNames.push(file.name);
@@ -823,6 +837,49 @@ async function handleImageFiles(files) {
   }
   renderUploadedThumbs();
   scheduleDraftSave(true);
+}
+
+function normalizeFileToMarketplaceJpgDataUrl(file) {
+  return new Promise((resolve, reject) => {
+    const objUrl = URL.createObjectURL(file);
+    const img = new Image();
+    img.onload = () => {
+      try {
+        const sw = img.naturalWidth || img.width;
+        const sh = img.naturalHeight || img.height;
+        if (!sw || !sh) { URL.revokeObjectURL(objUrl); reject(new Error('invalid dims')); return; }
+        const canvasW = 1200;
+        const canvasH = 1800;
+        const pad = 36;
+        const scale = Math.min((canvasW - pad * 2) / sw, (canvasH - pad * 2) / sh);
+        const dw = Math.max(1, Math.round(sw * scale));
+        const dh = Math.max(1, Math.round(sh * scale));
+        const dx = Math.floor((canvasW - dw) / 2);
+        const dy = Math.floor((canvasH - dh) / 2);
+
+        const canvas = document.createElement('canvas');
+        canvas.width = canvasW;
+        canvas.height = canvasH;
+        const ctx = canvas.getContext('2d');
+        ctx.fillStyle = '#FFFFFF';
+        ctx.fillRect(0, 0, canvasW, canvasH);
+        ctx.imageSmoothingEnabled = true;
+        ctx.imageSmoothingQuality = 'high';
+        ctx.drawImage(img, dx, dy, dw, dh);
+        const dataUrl = canvas.toDataURL('image/jpeg', 0.92);
+        URL.revokeObjectURL(objUrl);
+        resolve(dataUrl);
+      } catch (e) {
+        URL.revokeObjectURL(objUrl);
+        reject(e);
+      }
+    };
+    img.onerror = () => {
+      URL.revokeObjectURL(objUrl);
+      reject(new Error('decode failed'));
+    };
+    img.src = objUrl;
+  });
 }
 
 function readFileAsDataURL(file) {
