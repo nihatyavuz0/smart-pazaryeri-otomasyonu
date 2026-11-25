@@ -8,6 +8,7 @@ namespace SmartMarketplace
         public AiSettings AiConfig { get; set; }
         public SyncSettings SyncConfig { get; set; }
         public RemoteAccessSettings RemoteConfig { get; set; }
+        public UserProfileSettings UserProfile { get; set; }
         public DraftWorkspace Draft { get; set; }
         public List<MarketplaceConfig> Marketplaces { get; set; }
         public List<ProductRecord> Products { get; set; }
@@ -18,10 +19,68 @@ namespace SmartMarketplace
             AiConfig = new AiSettings();
             SyncConfig = new SyncSettings();
             RemoteConfig = new RemoteAccessSettings();
+            UserProfile = new UserProfileSettings();
             Draft = new DraftWorkspace();
             Marketplaces = new List<MarketplaceConfig>();
             Products = new List<ProductRecord>();
             Logs = new List<ActivityLog>();
+        }
+    }
+
+    public class UserProfileSettings
+    {
+        public string DisplayName { get; set; }
+        public string StoreName { get; set; }
+        public string PanelTitle { get; set; }
+        public string Email { get; set; }
+        public string Bio { get; set; }
+        public string AvatarColor { get; set; } // "khaki", "slate", "forest", "amber", "plum", "terracotta"
+        public string AvatarInitials { get; set; }
+        public string Theme { get; set; }       // "khaki", "slate", "forest", "sand", "dark"
+        public string Density { get; set; }     // "comfortable", "compact"
+        public string DefaultView { get; set; } // "dashboard", "add-product", "inventory", "apis"
+        public string UpdatedAt { get; set; }
+
+        public UserProfileSettings()
+        {
+            DisplayName = "Nihat Stark";
+            StoreName = "Pazaryeri Otomasyonu";
+            PanelTitle = "Smart";
+            Email = "";
+            Bio = "";
+            AvatarColor = "khaki";
+            AvatarInitials = "NS";
+            Theme = "khaki";
+            Density = "comfortable";
+            DefaultView = "dashboard";
+            UpdatedAt = "";
+        }
+    }
+
+    public class UserAccountRecord
+    {
+        public string Username { get; set; }
+        public string DisplayName { get; set; }
+        public string PasswordHash { get; set; }
+        public string Role { get; set; } // "admin", "user"
+        public int SessionVersion { get; set; }
+        public string CreatedAt { get; set; }
+        public string LastLoginAt { get; set; }
+
+        public UserAccountRecord()
+        {
+            Role = "user";
+            SessionVersion = 1;
+        }
+    }
+
+    public class UserAuthStore
+    {
+        public List<UserAccountRecord> Users { get; set; }
+
+        public UserAuthStore()
+        {
+            Users = new List<UserAccountRecord>();
         }
     }
 

@@ -1,0 +1,76 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <meta name="theme-color" content="#EAECE6" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-title" content="Smart" />
+  <link rel="manifest" href="/manifest.json" />
+  <link rel="icon" type="image/png" href="/favicon.png" />
+  <link rel="apple-touch-icon" href="/logo.png" />
+  <title>Smart — Kullanıcı Girişi</title>
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body class="pin-page login-page">
+  <main class="login-shell">
+    <section class="login-card">
+      <div class="pin-brand-mark">
+        <img src="/logo.png" alt="Smart Logo" />
+      </div>
+      <div class="pin-eyebrow">Smart Pazaryeri Otomasyonu</div>
+      <h1 class="pin-title">Kullanıcı Girişi</h1>
+      <p class="pin-subtitle">Hesabınızla giriş yapın; tüm cihazlarınızda ürünleriniz, API bağlantılarınız ve özelleştirmeleriniz eksiksiz aynı kalsın.</p>
+
+      <form id="login-form" class="login-form" method="post" action="/api/auth/login" autocomplete="on">
+        <div class="login-field">
+          <label for="login-username" class="login-label">Kullanıcı Adı</label>
+          <input
+            type="text"
+            name="username"
+            id="login-username"
+            class="login-input"
+            autocomplete="username"
+            autocapitalize="none"
+            spellcheck="false"
+            placeholder="Kullanıcı adınız"
+            required
+            autofocus
+          />
+        </div>
+
+        <div class="login-field">
+          <label for="login-password" class="login-label">Şifre</label>
+          <div class="login-pwd-wrap">
+            <input
+              type="password"
+              name="password"
+              id="login-password"
+              class="login-input login-input-pwd"
+              autocomplete="current-password"
+              placeholder="Şifreniz"
+              required
+            />
+            <button type="button" id="btn-toggle-pwd" class="login-pwd-toggle" aria-label="Şifreyi göster veya gizle">Göster</button>
+          </div>
+        </div>
+
+        <label class="login-remember">
+          <input type="checkbox" name="remember" id="login-remember" value="1" checked />
+          <span>Bu cihazda oturumu açık tut (30 gün)</span>
+        </label>
+
+        <div id="login-error" class="pin-error hidden" role="alert"></div>
+
+        <button type="submit" id="login-submit" class="btn btn-primary btn-full pin-btn">Panele Giriş Yap</button>
+      </form>
+
+      <div class="pin-foot">
+        <span class="pin-dot"></span>
+        <span>AES-256 Şifreli • Kalıcı Bulut Hesabı • Çoklu Cihaz Senkron</span>
+      </div>
+    </section>
+  </main>
+  <script src="/login.js"></script>
+</body>
+</html>

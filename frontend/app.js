@@ -8,6 +8,8 @@ const SESSION_TOKEN = (() => {
 })();
 
 const state = {
+  user: null,
+  userProfile: null,
   aiConfig: null,
   syncConfig: null,
   draft: null,
@@ -67,6 +69,7 @@ document.addEventListener('DOMContentLoaded', () => {
   bindInventoryEvents();
   bindSettingsEvents();
   bindBackupEvents();
+  bindAccountEvents();
   loadState(true);
   startLiveUpdateSync();
 
@@ -198,6 +201,8 @@ async function loadState(isInitial = false, fromRemoteSync = false) {
   try {
     const prevDraftSig = fromRemoteSync ? JSON.stringify(state.draft || {}) : '';
     const data = await apiFetch('/api/state');
+    state.user = data.user || null;
+    state.userProfile = data.userProfile || null;
     state.aiConfig = data.aiConfig;
     state.syncConfig = data.syncConfig;
     state.draft = data.draft || {};
@@ -205,10 +210,12 @@ async function loadState(isInitial = false, fromRemoteSync = false) {
     state.products = data.products || [];
     state.logs = data.logs || [];
 
+    applyUserProfileToUi();
+
     if (isInitial || !state.initialized) {
       restoreDraftFromServer(state.draft);
       state.initialized = true;
-      const startView = state.draft.ActiveView || 'dashboard';
+      const startView = (state.userProfile && state.userProfile.DefaultView) || state.draft.ActiveView || 'dashboard';
       applyViewDom(startView);
     } else if (fromRemoteSync) {
       const nextDraftSig = JSON.stringify(state.draft || {});
@@ -226,6 +233,9 @@ async function loadState(isInitial = false, fromRemoteSync = false) {
     }
     if (isInitial || (state.activeView !== 'apis' && !isFocusedInside('#view-apis'))) {
       renderApiPanel();
+    }
+    if (isInitial || !isFocusedInside('#view-account')) {
+      renderAccountView();
     }
     renderLogs();
     if (fromRemoteSync) {
@@ -318,6 +328,9 @@ function bindGlobalDelegatedActions() {
     switch (action) {
       case 'remove-image':
         removeUploadedImage(parseInt(actionEl.dataset.idx, 10));
+        break;
+      case 'delete-user':
+        handleDeleteUser(actionEl.dataset.username || '');
         break;
       case 'toggle-target-mp':
         toggleTargetMp(id);
@@ -2088,4 +2101,318 @@ function esc(str) {
 
 function escAttr(str) {
   return esc(str).replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+
+// ==========================================================
+// USER ACCOUNT, PROFILE & CUSTOMIZATION PANEL
+// ==========================================================
+const AVATAR_COLOR_CLASSES = ['av-khaki', 'av-slate', 'av-forest', 'av-amber', 'av-plum', 'av-terracotta'];
+
+function setAvatarColorClass(el, colorName) {
+  if (!el) return;
+  AVATAR_COLOR_CLASSES.forEach(c => el.classList.remove(c));
+  const cls = 'av-' + (colorName || 'khaki');
+  el.classList.add(AVATAR_COLOR_CLASSES.includes(cls) ? cls : 'av-khaki');
+}
+
+function applyUserProfileToUi() {
+  const p = state.userProfile || {};
+  const u = state.user || {};
+
+  const theme = p.Theme || 'khaki';
+  const density = p.Density || 'comfortable';
+  document.body.dataset.theme = theme;
+  document.body.dataset.density = density;
+
+  const panelTitle = p.PanelTitle || 'Smart';
+  const storeName = p.StoreName || 'Pazaryeri Otomasyonu';
+  const dispName = p.DisplayName || u.displayName || u.username || 'Kullanıcı';
+  const handle = '@' + (u.username || 'kullanici');
+  const initials = (p.AvatarInitials || dispName.slice(0, 2)).toUpperCase();
+  const avColor = p.AvatarColor || 'khaki';
+
+  document.title = `${panelTitle} — ${storeName}`;
+
+  const sbName = document.getElementById('sidebar-brand-name');
+  const sbSub = document.getElementById('sidebar-brand-sub');
+  const mbName = document.getElementById('mobile-brand-name');
+  if (sbName) sbName.textContent = panelTitle;
+  if (sbSub) sbSub.textContent = storeName;
+  if (mbName) mbName.textContent = panelTitle;
+
+  const sbAv = document.getElementById('sidebar-user-avatar');
+  const sbUserName = document.getElementById('sidebar-user-name');
+  const sbHandle = document.getElementById('sidebar-user-handle');
+  const mbAvBtn = document.getElementById('btn-mobile-account');
+  const mbInit = document.getElementById('mobile-user-initials');
+
+  if (sbAv) { sbAv.textContent = initials; setAvatarColorClass(sbAv, avColor); }
+  if (sbUserName) sbUserName.textContent = dispName;
+  if (sbHandle) sbHandle.textContent = handle;
+  if (mbAvBtn) setAvatarColorClass(mbAvBtn, avColor);
+  if (mbInit) mbInit.textContent = initials;
+}
+
+function renderAccountView() {
+  const p = state.userProfile || {};
+  const u = state.user || {};
+
+  const dispName = p.DisplayName || u.displayName || u.username || '';
+  const initials = (p.AvatarInitials || dispName.slice(0, 2)).toUpperCase();
+  const avColor = p.AvatarColor || 'khaki';
+  const theme = p.Theme || 'khaki';
+
+  const heroAv = document.getElementById('acc-avatar-preview');
+  const heroName = document.getElementById('acc-hero-name');
+  const heroSub = document.getElementById('acc-hero-sub');
+  const roleBadge = document.getElementById('acc-role-badge');
+  if (heroAv) { heroAv.textContent = initials; setAvatarColorClass(heroAv, avColor); }
+  if (heroName) heroName.textContent = dispName || 'Kullanıcı';
+  if (heroSub) heroSub.textContent = `@${u.username || ''} • Kalıcı Bulut Hesabı`;
+  if (roleBadge) roleBadge.textContent = u.isAdmin ? 'Yönetici' : 'Kullanıcı';
+
+  document.querySelectorAll('#acc-swatch-row .swatch-btn').forEach(btn => {
+    btn.classList.toggle('active', btn.dataset.avatarColor === avColor);
+  });
+
+  const setVal = (id, v) => { const el = document.getElementById(id); if (el) el.value = v || ''; };
+  setVal('acc-display-name', p.DisplayName);
+  setVal('acc-initials', p.AvatarInitials);
+  setVal('acc-panel-title', p.PanelTitle || 'Smart');
+  setVal('acc-store-name', p.StoreName || 'Pazaryeri Otomasyonu');
+  setVal('acc-email', p.Email);
+  setVal('acc-bio', p.Bio);
+  setVal('acc-density', p.Density || 'comfortable');
+  setVal('acc-default-view', p.DefaultView || 'dashboard');
+
+  document.querySelectorAll('#acc-theme-grid .theme-card').forEach(btn => {
+    btn.classList.toggle('active', btn.dataset.themePick === theme);
+  });
+
+  const uNameEl = document.getElementById('acc-info-username');
+  const lastLoginEl = document.getElementById('acc-info-last-login');
+  if (uNameEl) uNameEl.textContent = '@' + (u.username || '');
+  if (lastLoginEl) lastLoginEl.textContent = u.lastLoginAt || 'Aktif oturum';
+
+  // Admin user list card
+  const adminCard = document.getElementById('card-admin-users');
+  const usersList = document.getElementById('admin-users-list');
+  if (adminCard && usersList) {
+    if (u.isAdmin) {
+      adminCard.classList.remove('hidden');
+      const users = Array.isArray(u.users) ? u.users : [];
+      usersList.innerHTML = users.map(item => {
+        const isSelf = item.username === u.username;
+        const init = (item.displayName || item.username || 'U').slice(0, 2).toUpperCase();
+        return `
+          <div class="account-user-row">
+            <div class="account-user-row-left">
+              <div class="user-avatar ${item.role === 'admin' ? 'av-khaki' : 'av-slate'}">${esc(init)}</div>
+              <div>
+                <div class="account-user-row-name">${esc(item.displayName || item.username)} <span class="badge ${item.role === 'admin' ? 'badge-khaki' : 'badge-neutral'}">${item.role === 'admin' ? 'Yönetici' : 'Kullanıcı'}</span></div>
+                <div class="account-user-row-sub">@${esc(item.username)}${item.lastLoginAt ? ' • Son giriş: ' + esc(item.lastLoginAt) : ''}</div>
+              </div>
+            </div>
+            ${isSelf ? '<span class="badge badge-success">Aktif</span>' : `<button type="button" class="btn btn-danger-soft btn-xs" data-action="delete-user" data-username="${escAttr(item.username)}">Sil</button>`}
+          </div>
+        `;
+      }).join('');
+    } else {
+      adminCard.classList.add('hidden');
+    }
+  }
+}
+
+function collectAccountProfilePayload() {
+  const activeSwatch = document.querySelector('#acc-swatch-row .swatch-btn.active');
+  const activeTheme = document.querySelector('#acc-theme-grid .theme-card.active');
+  return {
+    DisplayName: (document.getElementById('acc-display-name')?.value || '').trim(),
+    AvatarInitials: (document.getElementById('acc-initials')?.value || '').trim(),
+    PanelTitle: (document.getElementById('acc-panel-title')?.value || '').trim() || 'Smart',
+    StoreName: (document.getElementById('acc-store-name')?.value || '').trim() || 'Pazaryeri Otomasyonu',
+    Email: (document.getElementById('acc-email')?.value || '').trim(),
+    Bio: (document.getElementById('acc-bio')?.value || '').trim(),
+    AvatarColor: activeSwatch ? activeSwatch.dataset.avatarColor : (state.userProfile?.AvatarColor || 'khaki'),
+    Theme: activeTheme ? activeTheme.dataset.themePick : (state.userProfile?.Theme || 'khaki'),
+    Density: document.getElementById('acc-density')?.value || 'comfortable',
+    DefaultView: document.getElementById('acc-default-view')?.value || 'dashboard'
+  };
+}
+
+async function saveUserProfile(successMsg) {
+  const payload = collectAccountProfilePayload();
+  try {
+    const res = await apiFetch('/api/account/profile', {
+      method: 'POST',
+      body: JSON.stringify(payload)
+    });
+    state.userProfile = res.userProfile || payload;
+    applyUserProfileToUi();
+    renderAccountView();
+    markSaved();
+    toast(successMsg || 'Hesap ve özelleştirme ayarlarınız kaydedildi.', 'success');
+  } catch (err) {
+    toast('Kaydedilemedi: ' + err.message, 'error');
+  }
+}
+
+async function handleLogout() {
+  const confirmed = await smartConfirm({
+    eyebrow: 'Oturum',
+    title: 'Çıkış yapılsın mı?',
+    message: 'Hesabınızdan çıkış yaptığınızda verileriniz ve API bağlantılarınız güvende kalır; dilediğiniz cihazdan tekrar giriş yapabilirsiniz.',
+    confirmText: 'Çıkış Yap',
+    cancelText: 'Vazgeç'
+  });
+  if (!confirmed) return;
+  try {
+    await fetch('/api/auth/logout', { method: 'POST', credentials: 'same-origin' });
+  } catch { }
+  window.location.replace('/?loggedout=' + Date.now());
+}
+
+async function handleLogoutAll() {
+  const confirmed = await smartConfirm({
+    eyebrow: 'Hesap Güvenliği',
+    title: 'Diğer cihazlardaki oturumlar kapatılsın mı?',
+    message: 'Bu cihazdaki oturumunuz açık kalır, diğer tüm tarayıcı ve telefonlardaki oturumlar anında sonlandırılır.',
+    confirmText: 'Diğer Oturumları Kapat',
+    cancelText: 'Vazgeç',
+    tone: 'danger'
+  });
+  if (!confirmed) return;
+  try {
+    await apiFetch('/api/auth/logout-all', { method: 'POST', body: '{}' });
+    toast('Diğer tüm cihazlardaki oturumlar başarıyla kapatıldı.', 'success');
+  } catch (err) {
+    toast('İşlem başarısız: ' + err.message, 'error');
+  }
+}
+
+async function handleDeleteUser(username) {
+  if (!username) return;
+  const confirmed = await smartConfirm({
+    eyebrow: 'Kullanıcı Yönetimi',
+    title: `'${username}' kullanıcısı silinsin mi?`,
+    message: 'Bu kullanıcı artık sisteme giriş yapamayacaktır.',
+    confirmText: 'Kullanıcıyı Sil',
+    cancelText: 'Vazgeç',
+    tone: 'danger'
+  });
+  if (!confirmed) return;
+  try {
+    const res = await apiFetch('/api/account/users/delete', {
+      method: 'POST',
+      body: JSON.stringify({ username })
+    });
+    if (state.user) state.user.users = res.users || [];
+    renderAccountView();
+    toast(`'${username}' hesabı kaldırıldı.`, 'info');
+  } catch (err) {
+    toast('Silinemedi: ' + err.message, 'error');
+  }
+}
+
+function bindAccountEvents() {
+  document.getElementById('btn-sidebar-logout')?.addEventListener('click', handleLogout);
+  document.getElementById('btn-account-logout')?.addEventListener('click', handleLogout);
+  document.getElementById('btn-logout-all-devices')?.addEventListener('click', handleLogoutAll);
+
+  // Live avatar color preview
+  document.querySelectorAll('#acc-swatch-row .swatch-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      document.querySelectorAll('#acc-swatch-row .swatch-btn').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      setAvatarColorClass(document.getElementById('acc-avatar-preview'), btn.dataset.avatarColor);
+    });
+  });
+
+  // Live initials preview
+  document.getElementById('acc-initials')?.addEventListener('input', e => {
+    const val = (e.target.value || '').toUpperCase().slice(0, 3);
+    const prev = document.getElementById('acc-avatar-preview');
+    if (prev && val) prev.textContent = val;
+  });
+
+  // Live theme preview on click
+  document.querySelectorAll('#acc-theme-grid .theme-card').forEach(btn => {
+    btn.addEventListener('click', () => {
+      document.querySelectorAll('#acc-theme-grid .theme-card').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      document.body.dataset.theme = btn.dataset.themePick || 'khaki';
+    });
+  });
+
+  // Live density preview
+  document.getElementById('acc-density')?.addEventListener('change', e => {
+    document.body.dataset.density = e.target.value || 'comfortable';
+  });
+
+  document.getElementById('account-profile-form')?.addEventListener('submit', e => {
+    e.preventDefault();
+    saveUserProfile('Profil ve panel kimliğiniz tüm cihazlarınız için kaydedildi.');
+  });
+
+  document.getElementById('btn-save-appearance')?.addEventListener('click', () => {
+    saveUserProfile('Tema ve görünüm özelleştirmeleriniz tüm cihazlarınız için kaydedildi.');
+  });
+
+  document.getElementById('account-password-form')?.addEventListener('submit', async e => {
+    e.preventDefault();
+    const curEl = document.getElementById('acc-cur-pwd');
+    const newEl = document.getElementById('acc-new-pwd');
+    const new2El = document.getElementById('acc-new-pwd2');
+    const curPwd = curEl?.value || '';
+    const newPwd = newEl?.value || '';
+    const newPwd2 = new2El?.value || '';
+
+    if (newPwd.length < 6) {
+      toast('Yeni şifre en az 6 karakter olmalıdır.', 'error');
+      return;
+    }
+    if (newPwd !== newPwd2) {
+      toast('Yeni şifre ve tekrarı eşleşmiyor.', 'error');
+      return;
+    }
+    try {
+      await apiFetch('/api/account/password', {
+        method: 'POST',
+        body: JSON.stringify({ currentPassword: curPwd, newPassword: newPwd })
+      });
+      if (curEl) curEl.value = '';
+      if (newEl) newEl.value = '';
+      if (new2El) new2El.value = '';
+      toast('Şifreniz güncellendi; diğer cihazlardaki eski oturumlar kapatıldı.', 'success');
+    } catch (err) {
+      toast('Şifre değiştirilemedi: ' + err.message, 'error');
+    }
+  });
+
+  document.getElementById('admin-create-user-form')?.addEventListener('submit', async e => {
+    e.preventDefault();
+    const uEl = document.getElementById('new-user-username');
+    const dEl = document.getElementById('new-user-display');
+    const pEl = document.getElementById('new-user-password');
+    const rEl = document.getElementById('new-user-role');
+    try {
+      const res = await apiFetch('/api/account/users/create', {
+        method: 'POST',
+        body: JSON.stringify({
+          username: uEl?.value || '',
+          displayName: dEl?.value || '',
+          password: pEl?.value || '',
+          role: rEl?.value || 'user'
+        })
+      });
+      if (state.user) state.user.users = res.users || [];
+      if (uEl) uEl.value = '';
+      if (dEl) dEl.value = '';
+      if (pEl) pEl.value = '';
+      renderAccountView();
+      toast('Yeni kullanıcı hesabı oluşturuldu.', 'success');
+    } catch (err) {
+      toast('Kullanıcı oluşturulamadı: ' + err.message, 'error');
+    }
+  });
 }

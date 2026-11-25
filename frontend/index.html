@@ -22,13 +22,14 @@
         <img src="/logo.png" alt="Smart" />
       </div>
       <div>
-        <div class="mobile-brand-name">Smart</div>
+        <div class="mobile-brand-name" id="mobile-brand-name">Smart</div>
         <div class="mobile-brand-sub" id="mobile-persist-text">Kalıcı Kayıt Aktif</div>
       </div>
     </div>
     <div class="mobile-topbar-actions">
       <button type="button" class="btn btn-soft btn-xs" id="btn-mobile-access-top" aria-label="Cihaz Bağlantısı">Bağlan</button>
       <button type="button" class="btn btn-khaki-soft btn-xs" id="btn-mobile-sync" aria-label="Stokları Eşitle">Eşitle</button>
+      <button type="button" class="mobile-user-btn av-khaki" id="btn-mobile-account" data-nav="account" aria-label="Hesabım ve Özelleştirme"><span id="mobile-user-initials">NS</span></button>
     </div>
   </header>
 
@@ -40,8 +41,8 @@
           <img src="/logo.png" alt="Smart Logo" class="brand-logo-img" />
         </div>
         <div>
-          <div class="brand-name">Smart</div>
-          <div class="brand-sub">Pazaryeri Otomasyonu</div>
+          <div class="brand-name" id="sidebar-brand-name">Smart</div>
+          <div class="brand-sub" id="sidebar-brand-sub">Pazaryeri Otomasyonu</div>
         </div>
       </div>
 
@@ -82,10 +83,30 @@
           </span>
           <span>İşlem Kayıtları</span>
         </button>
+
+        <button class="nav-item" data-view="account">
+          <span class="nav-icon">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
+          </span>
+          <span>Hesabım & Özelleştirme</span>
+        </button>
       </nav>
 
       <div class="sidebar-footer">
-        <div class="persist-pill" id="persist-status" title="Tüm değişiklikler otomatik olarak diske kaydedilir">
+        <div class="user-mini-card" id="sidebar-user-card">
+          <div class="user-mini-top">
+            <div class="user-avatar av-khaki" id="sidebar-user-avatar">NS</div>
+            <div class="user-mini-info">
+              <div class="user-mini-name" id="sidebar-user-name">Nihat Stark</div>
+              <div class="user-mini-handle" id="sidebar-user-handle">@nihatstark</div>
+            </div>
+          </div>
+          <div class="user-mini-actions">
+            <button type="button" class="btn btn-soft btn-xs" data-nav="account">Özelleştir</button>
+            <button type="button" class="btn btn-ghost btn-xs" id="btn-sidebar-logout">Çıkış</button>
+          </div>
+        </div>
+        <div class="persist-pill" id="persist-status" title="Tüm değişiklikler otomatik olarak hesabınıza kaydedilir">
           <span class="persist-dot"></span>
           <span id="persist-text">Kalıcı Kayıt Aktif</span>
         </div>
@@ -424,6 +445,244 @@
 
         <div class="card">
           <div id="logs-container" class="logs-list"></div>
+        </div>
+      </section>
+
+      <!-- ACCOUNT & CUSTOMIZATION VIEW -->
+      <section class="view" id="view-account">
+        <header class="page-header">
+          <div>
+            <h1>Hesabım & Özelleştirme</h1>
+            <p class="subtitle">Profiliniz, tema tercihleriniz, ürünleriniz ve tüm pazaryeri bağlantılarınız hesabınıza bağlı olarak her cihazda aynı kalır.</p>
+          </div>
+          <button type="button" class="btn btn-soft" id="btn-account-logout">Çıkış Yap</button>
+        </header>
+
+        <div class="grid-2 account-grid">
+          <!-- Card 1: Profile & Store Identity -->
+          <div class="card">
+            <div class="card-head">
+              <h2>Profil & Panel Kimliği</h2>
+              <span class="badge badge-khaki" id="acc-role-badge">Yönetici</span>
+            </div>
+
+            <div class="account-avatar-hero">
+              <div class="user-avatar user-avatar-lg av-khaki" id="acc-avatar-preview">NS</div>
+              <div class="account-avatar-meta">
+                <div class="account-avatar-title" id="acc-hero-name">Nihat Stark</div>
+                <div class="account-avatar-sub" id="acc-hero-sub">@nihatstark • Kalıcı Bulut Hesabı</div>
+                <div class="swatch-row" id="acc-swatch-row" aria-label="Avatar rengi">
+                  <button type="button" class="swatch-btn av-khaki active" data-avatar-color="khaki" title="Haki"></button>
+                  <button type="button" class="swatch-btn av-slate" data-avatar-color="slate" title="Lacivert Arduvaz"></button>
+                  <button type="button" class="swatch-btn av-forest" data-avatar-color="forest" title="Orman Yeşili"></button>
+                  <button type="button" class="swatch-btn av-amber" data-avatar-color="amber" title="Kehribar"></button>
+                  <button type="button" class="swatch-btn av-plum" data-avatar-color="plum" title="Erik"></button>
+                  <button type="button" class="swatch-btn av-terracotta" data-avatar-color="terracotta" title="Terracotta"></button>
+                </div>
+              </div>
+            </div>
+
+            <form id="account-profile-form" class="account-form">
+              <div class="account-form-row">
+                <label class="field-label">
+                  <span>Görünen Ad</span>
+                  <input type="text" id="acc-display-name" class="input" maxlength="60" placeholder="Örn: Nihat Stark" />
+                </label>
+                <label class="field-label">
+                  <span>Monogram (2-3 Harf)</span>
+                  <input type="text" id="acc-initials" class="input" maxlength="3" placeholder="NS" />
+                </label>
+              </div>
+              <div class="account-form-row">
+                <label class="field-label">
+                  <span>Panel Başlığı</span>
+                  <input type="text" id="acc-panel-title" class="input" maxlength="32" placeholder="Smart" />
+                </label>
+                <label class="field-label">
+                  <span>Mağaza / Alt Başlık</span>
+                  <input type="text" id="acc-store-name" class="input" maxlength="60" placeholder="Pazaryeri Otomasyonu" />
+                </label>
+              </div>
+              <label class="field-label">
+                <span>E-posta (İsteğe Bağlı)</span>
+                <input type="email" id="acc-email" class="input" maxlength="100" placeholder="ornek@alanadi.com" />
+              </label>
+              <label class="field-label">
+                <span>Kısa Not / Mağaza Açıklaması</span>
+                <textarea id="acc-bio" class="input" rows="2" maxlength="240" placeholder="Hesabınıza özel hatırlatma veya mağaza notu..."></textarea>
+              </label>
+              <div class="account-form-actions">
+                <button type="submit" class="btn btn-primary" id="btn-save-profile">Profili Kaydet</button>
+              </div>
+            </form>
+          </div>
+
+          <!-- Card 2: Theme & Interface Customization -->
+          <div class="card">
+            <div class="card-head">
+              <h2>Arayüz & Tema Özelleştirme</h2>
+              <span class="badge badge-success">Tüm Cihazlarda Senkron</span>
+            </div>
+
+            <p class="account-card-desc">Seçtiğiniz tema, görünüm yoğunluğu ve açılış sayfası hesabınıza kaydedilir; başka bir bilgisayardan girdiğinizde paneliniz aynı şekilde açılır.</p>
+
+            <div class="field-label">
+              <span>Renk Teması</span>
+              <div class="theme-grid" id="acc-theme-grid">
+                <button type="button" class="theme-card active" data-theme-pick="khaki">
+                  <span class="theme-preview">
+                    <span style="background:#EAECE6"></span>
+                    <span style="background:#FAFAF8"></span>
+                    <span style="background:#6B7857"></span>
+                  </span>
+                  <span class="theme-name">Taş & Haki</span>
+                  <span class="theme-hint">Klasik Smart</span>
+                </button>
+                <button type="button" class="theme-card" data-theme-pick="slate">
+                  <span class="theme-preview">
+                    <span style="background:#E8EDF3"></span>
+                    <span style="background:#F9FBFD"></span>
+                    <span style="background:#3B5B7C"></span>
+                  </span>
+                  <span class="theme-name">Klasik Lacivert</span>
+                  <span class="theme-hint">Kurumsal</span>
+                </button>
+                <button type="button" class="theme-card" data-theme-pick="forest">
+                  <span class="theme-preview">
+                    <span style="background:#E6EFEA"></span>
+                    <span style="background:#F8FBF9"></span>
+                    <span style="background:#2E6B52"></span>
+                  </span>
+                  <span class="theme-name">Orman Yeşili</span>
+                  <span class="theme-hint">Ferah</span>
+                </button>
+                <button type="button" class="theme-card" data-theme-pick="sand">
+                  <span class="theme-preview">
+                    <span style="background:#F1ECE3"></span>
+                    <span style="background:#FCFBF8"></span>
+                    <span style="background:#8C6A42"></span>
+                  </span>
+                  <span class="theme-name">Sıcak Kum</span>
+                  <span class="theme-hint">Yumuşak Bej</span>
+                </button>
+                <button type="button" class="theme-card" data-theme-pick="dark">
+                  <span class="theme-preview">
+                    <span style="background:#181B18"></span>
+                    <span style="background:#232823"></span>
+                    <span style="background:#8FA676"></span>
+                  </span>
+                  <span class="theme-name">Gece Modu</span>
+                  <span class="theme-hint">Koyu Tema</span>
+                </button>
+              </div>
+            </div>
+
+            <div class="account-form-row" style="margin-top:14px;">
+              <label class="field-label">
+                <span>Görünüm Yoğunluğu</span>
+                <select id="acc-density" class="input">
+                  <option value="comfortable">Rahat (Varsayılan)</option>
+                  <option value="compact">Kompakt (Daha fazla içerik)</option>
+                </select>
+              </label>
+              <label class="field-label">
+                <span>Varsayılan Açılış Sayfası</span>
+                <select id="acc-default-view" class="input">
+                  <option value="dashboard">Genel Bakış</option>
+                  <option value="add-product">Ürün Ekle</option>
+                  <option value="inventory">Ürünler & Stok</option>
+                  <option value="apis">API Bağlantıları</option>
+                </select>
+              </label>
+            </div>
+
+            <div class="account-form-actions" style="margin-top:14px;">
+              <button type="button" class="btn btn-primary" id="btn-save-appearance">Görünümü Kaydet</button>
+            </div>
+          </div>
+
+          <!-- Card 3: Security & Password -->
+          <div class="card">
+            <div class="card-head">
+              <h2>Hesap Güvenliği & Oturum</h2>
+            </div>
+
+            <div class="account-meta-box">
+              <div class="account-meta-row">
+                <span>Kullanıcı Adı</span>
+                <strong id="acc-info-username">@nihatstark</strong>
+              </div>
+              <div class="account-meta-row">
+                <span>Son Giriş</span>
+                <strong id="acc-info-last-login">-</strong>
+              </div>
+              <div class="account-meta-row">
+                <span>Veri Depolama</span>
+                <strong id="acc-info-storage">Şifreli Kalıcı Bulut Hesabı</strong>
+              </div>
+            </div>
+
+            <form id="account-password-form" class="account-form" style="margin-top:14px;">
+              <label class="field-label">
+                <span>Mevcut Şifre</span>
+                <input type="password" id="acc-cur-pwd" class="input" autocomplete="current-password" placeholder="Mevcut şifreniz" required />
+              </label>
+              <div class="account-form-row">
+                <label class="field-label">
+                  <span>Yeni Şifre</span>
+                  <input type="password" id="acc-new-pwd" class="input" autocomplete="new-password" minlength="6" placeholder="En az 6 karakter" required />
+                </label>
+                <label class="field-label">
+                  <span>Yeni Şifre (Tekrar)</span>
+                  <input type="password" id="acc-new-pwd2" class="input" autocomplete="new-password" minlength="6" placeholder="Tekrar girin" required />
+                </label>
+              </div>
+              <div class="account-form-actions">
+                <button type="submit" class="btn btn-primary" id="btn-change-password">Şifreyi Güncelle</button>
+                <button type="button" class="btn btn-soft" id="btn-logout-all-devices">Diğer Cihazlardan Çıkış Yap</button>
+              </div>
+            </form>
+          </div>
+
+          <!-- Card 4: Admin User Management -->
+          <div class="card hidden" id="card-admin-users">
+            <div class="card-head">
+              <h2>Kullanıcı Hesapları</h2>
+              <span class="badge badge-info">İzole Çalışma Alanları</span>
+            </div>
+            <p class="account-card-desc">Her kullanıcı kendi şifreli ürünlerine, API anahtarlarına ve tema özelleştirmelerine sahip olur.</p>
+
+            <div class="account-users-list" id="admin-users-list"></div>
+
+            <form id="admin-create-user-form" class="account-form" style="margin-top:14px;">
+              <div class="account-form-row">
+                <label class="field-label">
+                  <span>Yeni Kullanıcı Adı</span>
+                  <input type="text" id="new-user-username" class="input" minlength="3" maxlength="32" placeholder="ornek_kullanici" required />
+                </label>
+                <label class="field-label">
+                  <span>Görünen Ad</span>
+                  <input type="text" id="new-user-display" class="input" maxlength="60" placeholder="Ad Soyad" />
+                </label>
+              </div>
+              <div class="account-form-row">
+                <label class="field-label">
+                  <span>Şifre</span>
+                  <input type="password" id="new-user-password" class="input" minlength="6" placeholder="En az 6 karakter" required />
+                </label>
+                <label class="field-label">
+                  <span>Rol</span>
+                  <select id="new-user-role" class="input">
+                    <option value="user">Kullanıcı</option>
+                    <option value="admin">Yönetici</option>
+                  </select>
+                </label>
+              </div>
+              <div class="account-form-actions">
+                <button type="submit" class="btn btn-primary" id="btn-create-user">+ Yeni Kullanıcı Ekle</button>
+              </div>
+            </form>
+          </div>
         </div>
       </section>
     </main>

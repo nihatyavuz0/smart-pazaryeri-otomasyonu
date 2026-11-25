@@ -207,7 +207,7 @@ namespace SmartMarketplace
             long sum = 0;
             try
             {
-                string[] files = { "index.html", "styles.css", "app.js" };
+                string[] files = { "index.html", "styles.css", "app.js", "login.html", "login.js" };
                 foreach (var f in files)
                 {
                     string p = Path.Combine(_frontendDir, f);
@@ -222,12 +222,23 @@ namespace SmartMarketplace
         {
             try
             {
-                var db = Storage.Load();
-                if (!db.SyncConfig.AutoSyncEnabled || db.Products.Count == 0) return;
-                int mins = Math.Max(1, db.SyncConfig.IntervalMinutes);
-                if ((DateTime.Now - _lastAutoSync).TotalMinutes < mins) return;
-                _lastAutoSync = DateTime.Now;
-                RunFullStockSync(db, "Otomatik Zamanlayıcı");
+                foreach (var uname in UserAuthService.ListAllUsernames())
+                {
+                    Storage.CurrentUser = uname;
+                    try
+                    {
+                        var db = Storage.Load();
+                        if (!db.SyncConfig.AutoSyncEnabled || db.Products.Count == 0) continue;
+                        int mins = Math.Max(1, db.SyncConfig.IntervalMinutes);
+                        if ((DateTime.Now - _lastAutoSync).TotalMinutes < mins) continue;
+                        _lastAutoSync = DateTime.Now;
+                        RunFullStockSync(db, "Otomatik Zamanlayıcı");
+                    }
+                    finally
+                    {
+                        Storage.CurrentUser = null;
+                    }
+                }
             }
             catch { }
         }
@@ -318,39 +329,56 @@ namespace SmartMarketplace
                                 WriteJson(stream, 401, new { ok = false, error = "Yetkisiz zamanlanmış görev isteği." });
                                 return;
                             }
-                            var dbCron = Storage.Load();
                             int syncedOps = 0;
-                            if (dbCron.SyncConfig != null && dbCron.SyncConfig.AutoSyncEnabled && dbCron.Products.Count > 0)
+                            foreach (var uname in UserAuthService.ListAllUsernames())
                             {
-                                syncedOps = RunFullStockSync(dbCron, "Vercel Otomatik Zamanlayıcı");
+                                Storage.CurrentUser = uname;
+                                try
+                                {
+                                    var dbCron = Storage.Load();
+                                    if (dbCron.SyncConfig != null && dbCron.SyncConfig.AutoSyncEnabled && dbCron.Products.Count > 0)
+                                    {
+                                        syncedOps += RunFullStockSync(dbCron, "Vercel Otomatik Zamanlayıcı");
+                                    }
+                                }
+                                finally
+                                {
+                                    Storage.CurrentUser = null;
+                                }
                             }
                             WriteJson(stream, 200, new { ok = true, syncedOperations = syncedOps });
                             return;
                         }
 
-                        // 3. Remote HTTPS Tunnel / Cloud PIN Gate (protects remote access from any network with 6-digit PIN + HttpOnly cookie)
-                        bool isTunnel = Security.IsTunnelRequest(req.Headers);
-                        bool remoteAuthed = !isTunnel;
-                        if (isTunnel)
+                        // 3. User Authentication Gate (persistent multi-device login + per-user workspace)
+                        bool isHttps = Security.IsCloudMode
+                            || Security.IsTunnelRequest(req.Headers)
+                            || (req.Headers.ContainsKey("X-Forwarded-Proto") && string.Equals(req.Headers["X-Forwarded-Proto"], "https", StringComparison.OrdinalIgnoreCase));
+
+                        if (path == "/api/auth/login" && req.Method == "POST")
                         {
-                            string cachedPin = Storage.GetCachedAccessPin(false);
-                            remoteAuthed = Security.HasValidRemoteCookie(req.Headers, cachedPin);
-                            if (!remoteAuthed && Security.IsCloudMode && req.Headers.ContainsKey("Cookie") && (req.Headers["Cookie"] ?? "").Contains("smart_remote_auth="))
-                            {
-                                string freshPin = Storage.GetCachedAccessPin(true);
-                                remoteAuthed = Security.HasValidRemoteCookie(req.Headers, freshPin);
-                            }
+                            HandleUserLogin(req, stream, isHttps);
+                            return;
+                        }
+
+                        if (path == "/api/auth/logout" && req.Method == "POST")
+                        {
+                            string clearCookie = UserAuthService.BuildClearSessionCookie(isHttps);
+                            string json = Storage.Serialize(new { ok = true });
+                            WriteResponse(stream, 200, "application/json; charset=utf-8", Encoding.UTF8.GetBytes(json), clearCookie);
+                            return;
                         }
 
                         if (path == "/api/auth/pin" && req.Method == "POST")
                         {
-                            HandlePinLogin(req, stream, isTunnel);
+                            HandlePinLogin(req, stream, isHttps);
                             return;
                         }
 
-                        if (!remoteAuthed)
+                        var authUser = UserAuthService.ValidateSessionCookie(req.Headers);
+                        if (authUser == null)
                         {
-                            if (path == "/styles.css" || path == "/pin.js" || path == "/logo.png" || path == "/favicon.png" || path == "/manifest.json")
+                            if (path == "/styles.css" || path == "/login.js" || path == "/pin.js" || path == "/logo.png" || path == "/favicon.png" || path == "/manifest.json")
                             {
                                 string assetPath;
                                 if (Security.TryResolveSafePath(_frontendDir, path.TrimStart('/'), out assetPath) && File.Exists(assetPath))
@@ -359,18 +387,196 @@ namespace SmartMarketplace
                                     return;
                                 }
                             }
+                            if (path == "/favicon.ico")
+                            {
+                                string favPath;
+                                if (Security.TryResolveSafePath(_frontendDir, "favicon.png", out favPath) && File.Exists(favPath))
+                                {
+                                    ServeFile(favPath, stream, false);
+                                    return;
+                                }
+                            }
                             if (path.StartsWith("/api/"))
                             {
-                                WriteJson(stream, 401, new { ok = false, error = "Uzaktan erişim için PIN doğrulaması gereklidir." });
+                                WriteJson(stream, 401, new { ok = false, error = "Devam etmek için kullanıcı girişi yapmalısınız." });
                                 return;
                             }
-                            string pinHtmlPath;
-                            if (Security.TryResolveSafePath(_frontendDir, "pin.html", out pinHtmlPath) && File.Exists(pinHtmlPath))
-                                ServeFile(pinHtmlPath, stream, false);
+                            string loginHtmlPath;
+                            if (Security.TryResolveSafePath(_frontendDir, "login.html", out loginHtmlPath) && File.Exists(loginHtmlPath))
+                                ServeFile(loginHtmlPath, stream, false);
                             else
-                                WriteResponse(stream, 401, "text/plain; charset=utf-8", Encoding.UTF8.GetBytes("PIN Gerekli"));
+                                WriteResponse(stream, 401, "text/plain; charset=utf-8", Encoding.UTF8.GetBytes("Giriş Gerekli"));
                             return;
                         }
+
+                        Storage.CurrentUser = authUser.Username;
+                        try
+                        {
+                            HandleAuthenticatedRequest(path, host, isHttps, authUser, req, stream);
+                        }
+                        finally
+                        {
+                            Storage.CurrentUser = null;
+                        }
+                        return;
+                    }
+                }
+                catch
+                {
+                    // Safe silent close on malformed socket
+                }
+            }
+        }
+
+        private static void HandleAuthenticatedRequest(string path, string host, bool isHttps, UserAccountRecord authUser, SimpleHttpRequest req, NetworkStream stream)
+        {
+            if (path == "/api/auth/logout-all" && req.Method == "POST")
+            {
+                if (!Security.IsValidSessionToken(req.Headers))
+                {
+                    WriteJson(stream, 403, new { ok = false, error = "Yetkisiz istek." });
+                    return;
+                }
+                var rotated = UserAuthService.RotateSessions(authUser.Username);
+                string freshCookie = rotated != null ? UserAuthService.BuildSessionCookie(rotated, true, isHttps) : null;
+                var dbLog = Storage.Load();
+                Storage.AddLog(dbLog, "system", "info", "Hesap Güvenliği", "Diğer tüm cihazlardaki oturumlar sonlandırıldı.");
+                Storage.Save(dbLog);
+                string json = Storage.Serialize(new { ok = true });
+                WriteResponse(stream, 200, "application/json; charset=utf-8", Encoding.UTF8.GetBytes(json), freshCookie);
+                return;
+            }
+
+            if (path == "/api/account/profile" && req.Method == "POST")
+            {
+                if (!Security.IsValidSessionToken(req.Headers))
+                {
+                    WriteJson(stream, 403, new { ok = false, error = "Yetkisiz istek." });
+                    return;
+                }
+                var incoming = Storage.Deserialize<UserProfileSettings>(req.Body);
+                if (incoming == null)
+                {
+                    WriteJson(stream, 400, new { ok = false, error = "Geçersiz profil verisi." });
+                    return;
+                }
+                var dbProf = Storage.Load();
+                var p = dbProf.UserProfile ?? new UserProfileSettings();
+                string disp = (incoming.DisplayName ?? "").Trim();
+                if (!string.IsNullOrEmpty(disp)) p.DisplayName = disp.Length > 60 ? disp.Substring(0, 60) : disp;
+                string store = (incoming.StoreName ?? "").Trim();
+                p.StoreName = string.IsNullOrEmpty(store) ? "Pazaryeri Otomasyonu" : (store.Length > 60 ? store.Substring(0, 60) : store);
+                string panel = (incoming.PanelTitle ?? "").Trim();
+                p.PanelTitle = string.IsNullOrEmpty(panel) ? "Smart" : (panel.Length > 32 ? panel.Substring(0, 32) : panel);
+                string email = (incoming.Email ?? "").Trim();
+                p.Email = email.Length > 100 ? email.Substring(0, 100) : email;
+                string bio = (incoming.Bio ?? "").Trim();
+                p.Bio = bio.Length > 240 ? bio.Substring(0, 240) : bio;
+
+                string[] validColors = { "khaki", "slate", "forest", "amber", "plum", "terracotta" };
+                p.AvatarColor = validColors.Contains((incoming.AvatarColor ?? "").ToLowerInvariant()) ? incoming.AvatarColor.ToLowerInvariant() : "khaki";
+                string initials = (incoming.AvatarInitials ?? "").Trim().ToUpperInvariant();
+                initials = System.Text.RegularExpressions.Regex.Replace(initials, @"[^A-Z0-9ÇĞİÖŞÜ]", "");
+                p.AvatarInitials = string.IsNullOrEmpty(initials) ? Storage.BuildInitials(p.DisplayName) : (initials.Length > 3 ? initials.Substring(0, 3) : initials);
+
+                string[] validThemes = { "khaki", "slate", "forest", "sand", "dark" };
+                p.Theme = validThemes.Contains((incoming.Theme ?? "").ToLowerInvariant()) ? incoming.Theme.ToLowerInvariant() : "khaki";
+                p.Density = string.Equals(incoming.Density, "compact", StringComparison.OrdinalIgnoreCase) ? "compact" : "comfortable";
+                string[] validViews = { "dashboard", "add-product", "inventory", "apis", "logs", "account" };
+                p.DefaultView = validViews.Contains((incoming.DefaultView ?? "").ToLowerInvariant()) ? incoming.DefaultView.ToLowerInvariant() : "dashboard";
+                p.UpdatedAt = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss");
+
+                dbProf.UserProfile = p;
+                UserAuthService.UpdateDisplayName(authUser.Username, p.DisplayName);
+                Storage.AddLog(dbProf, "system", "info", "Hesap & Özelleştirme", "Profil ve görünüm özelleştirmeleri kaydedildi (Tema: " + p.Theme + ").");
+                Storage.Save(dbProf);
+                WriteJson(stream, 200, new { ok = true, userProfile = p });
+                return;
+            }
+
+            if (path == "/api/account/password" && req.Method == "POST")
+            {
+                if (!Security.IsValidSessionToken(req.Headers))
+                {
+                    WriteJson(stream, 403, new { ok = false, error = "Yetkisiz istek." });
+                    return;
+                }
+                var body = Storage.Deserialize<Dictionary<string, object>>(req.Body);
+                string curPwd = body != null && body.ContainsKey("currentPassword") ? Convert.ToString(body["currentPassword"]) : "";
+                string newPwd = body != null && body.ContainsKey("newPassword") ? Convert.ToString(body["newPassword"]) : "";
+                UserAccountRecord updated;
+                string err;
+                if (!UserAuthService.ChangePassword(authUser.Username, curPwd, newPwd, out updated, out err))
+                {
+                    WriteJson(stream, 400, new { ok = false, error = err });
+                    return;
+                }
+                var dbPwd = Storage.Load();
+                Storage.AddLog(dbPwd, "system", "success", "Hesap Güvenliği", "Hesap şifresi güncellendi; diğer cihazlardaki oturumlar kapatıldı.");
+                Storage.Save(dbPwd);
+                string freshCookie = UserAuthService.BuildSessionCookie(updated, true, isHttps);
+                string json = Storage.Serialize(new { ok = true });
+                WriteResponse(stream, 200, "application/json; charset=utf-8", Encoding.UTF8.GetBytes(json), freshCookie);
+                return;
+            }
+
+            if (path == "/api/account/users/create" && req.Method == "POST")
+            {
+                if (!Security.IsValidSessionToken(req.Headers))
+                {
+                    WriteJson(stream, 403, new { ok = false, error = "Yetkisiz istek." });
+                    return;
+                }
+                if (!string.Equals(authUser.Role, "admin", StringComparison.OrdinalIgnoreCase))
+                {
+                    WriteJson(stream, 403, new { ok = false, error = "Yeni kullanıcı ekleme yetkisi yalnızca yöneticidedir." });
+                    return;
+                }
+                var body = Storage.Deserialize<Dictionary<string, object>>(req.Body);
+                string uname = body != null && body.ContainsKey("username") ? Convert.ToString(body["username"]) : "";
+                string pwd = body != null && body.ContainsKey("password") ? Convert.ToString(body["password"]) : "";
+                string disp = body != null && body.ContainsKey("displayName") ? Convert.ToString(body["displayName"]) : "";
+                string role = body != null && body.ContainsKey("role") ? Convert.ToString(body["role"]) : "user";
+                UserAccountRecord created;
+                string err;
+                if (!UserAuthService.CreateUser(uname, pwd, disp, role, out created, out err))
+                {
+                    WriteJson(stream, 400, new { ok = false, error = err });
+                    return;
+                }
+                var dbAdm = Storage.Load();
+                Storage.AddLog(dbAdm, "system", "success", "Kullanıcı Yönetimi", "'" + created.Username + "' kullanıcısı oluşturuldu.");
+                Storage.Save(dbAdm);
+                WriteJson(stream, 200, new { ok = true, users = UserAuthService.ListPublicUsers() });
+                return;
+            }
+
+            if (path == "/api/account/users/delete" && req.Method == "POST")
+            {
+                if (!Security.IsValidSessionToken(req.Headers))
+                {
+                    WriteJson(stream, 403, new { ok = false, error = "Yetkisiz istek." });
+                    return;
+                }
+                if (!string.Equals(authUser.Role, "admin", StringComparison.OrdinalIgnoreCase))
+                {
+                    WriteJson(stream, 403, new { ok = false, error = "Kullanıcı silme yetkisi yalnızca yöneticidedir." });
+                    return;
+                }
+                var body = Storage.Deserialize<Dictionary<string, object>>(req.Body);
+                string target = body != null && body.ContainsKey("username") ? Convert.ToString(body["username"]) : "";
+                string err;
+                if (!UserAuthService.DeleteUser(authUser.Username, target, out err))
+                {
+                    WriteJson(stream, 400, new { ok = false, error = err });
+                    return;
+                }
+                var dbAdm = Storage.Load();
+                Storage.AddLog(dbAdm, "system", "warning", "Kullanıcı Yönetimi", "'" + target + "' kullanıcısı kaldırıldı.");
+                Storage.Save(dbAdm);
+                WriteJson(stream, 200, new { ok = true, users = UserAuthService.ListPublicUsers() });
+                return;
+            }
 
                         if (path == "/api/version" && req.Method == "GET")
                         {
@@ -553,13 +759,6 @@ namespace SmartMarketplace
                                 ServeFile(fullFrontendPath, stream, false);
                             }
                         }
-                    }
-                }
-                catch
-                {
-                    // Safe silent close on malformed socket
-                }
-            }
         }
 
         private static SimpleHttpRequest ParseHttpRequest(NetworkStream stream)
@@ -768,9 +967,22 @@ namespace SmartMarketplace
                     var db = Storage.Load();
                     // Never send raw decrypted secrets back to browser DOM — send masked placeholders
                     var safeView = Security.CloneWithMaskedSecrets(db, false);
+                    var curUser = UserAuthService.GetUser(Storage.CurrentUser, false);
+                    bool isAdmin = curUser != null && string.Equals(curUser.Role, "admin", StringComparison.OrdinalIgnoreCase);
                     WriteJson(stream, 200, new
                     {
                         ok = true,
+                        user = curUser == null ? null : new
+                        {
+                            username = curUser.Username,
+                            displayName = curUser.DisplayName,
+                            role = curUser.Role,
+                            createdAt = curUser.CreatedAt,
+                            lastLoginAt = curUser.LastLoginAt,
+                            isAdmin = isAdmin,
+                            users = isAdmin ? UserAuthService.ListPublicUsers() : new List<object>()
+                        },
+                        userProfile = safeView.UserProfile,
                         aiConfig = safeView.AiConfig,
                         syncConfig = safeView.SyncConfig,
                         draft = safeView.Draft,
@@ -779,11 +991,12 @@ namespace SmartMarketplace
                         logs = safeView.Logs,
                         security = new
                         {
-                            dpapiActive = true,
+                            dpapiActive = !Security.IsCloudMode,
+                            cloudMode = Security.IsCloudMode,
                             sessionTokenActive = true,
                             cspStrict = true,
-                            loopbackOnly = true,
-                            backupProtected = File.Exists(Storage.BackupPath)
+                            loopbackOnly = !Security.IsCloudMode,
+                            backupProtected = CloudBlobStorage.IsConfigured || File.Exists(Storage.BackupPath)
                         }
                     });
                     return;
@@ -1424,6 +1637,93 @@ namespace SmartMarketplace
             else
                 html = html.Replace("</head>", "  " + metaTag + "\n</head>");
             WriteResponse(stream, 200, "text/html; charset=utf-8", Encoding.UTF8.GetBytes(html));
+        }
+
+        private static void HandleUserLogin(SimpleHttpRequest req, NetworkStream stream, bool isHttps)
+        {
+            if (!Security.CheckRateLimit("user_login", 15))
+            {
+                WriteJson(stream, 429, new { ok = false, error = "Çok fazla giriş denemesi. Lütfen 1 dakika bekleyin." });
+                return;
+            }
+            try
+            {
+                string ct = req.Headers.ContainsKey("Content-Type") ? (req.Headers["Content-Type"] ?? "") : "";
+                bool isForm = ct.IndexOf("application/x-www-form-urlencoded", StringComparison.OrdinalIgnoreCase) >= 0;
+                string username = "";
+                string password = "";
+                bool remember = true;
+
+                if (isForm)
+                {
+                    remember = false;
+                    foreach (var pair in (req.Body ?? "").Split('&'))
+                    {
+                        int eq = pair.IndexOf('=');
+                        if (eq <= 0) continue;
+                        string k = pair.Substring(0, eq);
+                        string v = Uri.UnescapeDataString(pair.Substring(eq + 1).Replace("+", " "));
+                        if (k.Equals("username", StringComparison.OrdinalIgnoreCase)) username = v;
+                        else if (k.Equals("password", StringComparison.OrdinalIgnoreCase)) password = v;
+                        else if (k.Equals("remember", StringComparison.OrdinalIgnoreCase)) remember = (v == "1" || v.Equals("true", StringComparison.OrdinalIgnoreCase) || v.Equals("on", StringComparison.OrdinalIgnoreCase));
+                    }
+                }
+                else
+                {
+                    var body = Storage.Deserialize<Dictionary<string, object>>(req.Body);
+                    if (body != null)
+                    {
+                        if (body.ContainsKey("username") && body["username"] != null) username = Convert.ToString(body["username"]);
+                        if (body.ContainsKey("password") && body["password"] != null) password = Convert.ToString(body["password"]);
+                        if (body.ContainsKey("remember") && body["remember"] != null) remember = Convert.ToBoolean(body["remember"]);
+                    }
+                }
+
+                string err;
+                var user = UserAuthService.Authenticate(username, password, out err);
+                if (user == null)
+                {
+                    WriteJson(stream, 401, new { ok = false, error = err });
+                    return;
+                }
+
+                // Ensure user workspace is loaded & log login
+                Storage.CurrentUser = user.Username;
+                try
+                {
+                    var db = Storage.Load();
+                    Storage.AddLog(db, "system", "success", "Oturum", "'" + user.Username + "' hesabıyla giriş yapıldı.");
+                    Storage.Save(db);
+                }
+                finally
+                {
+                    Storage.CurrentUser = null;
+                }
+
+                string cookie = UserAuthService.BuildSessionCookie(user, remember, isHttps);
+                if (isForm)
+                {
+                    WriteResponse(stream, 303, "text/plain; charset=utf-8", new byte[0], cookie, "/?ok=" + DateTime.UtcNow.Ticks);
+                }
+                else
+                {
+                    string json = Storage.Serialize(new
+                    {
+                        ok = true,
+                        user = new
+                        {
+                            username = user.Username,
+                            displayName = user.DisplayName,
+                            role = user.Role
+                        }
+                    });
+                    WriteResponse(stream, 200, "application/json; charset=utf-8", Encoding.UTF8.GetBytes(json), cookie);
+                }
+            }
+            catch
+            {
+                WriteJson(stream, 400, new { ok = false, error = "Geçersiz giriş isteği." });
+            }
         }
 
         private static void HandlePinLogin(SimpleHttpRequest req, NetworkStream stream, bool isHttps)

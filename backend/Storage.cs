@@ -13,7 +13,7 @@ namespace SmartMarketplace
 {
     public static class Storage
     {
-        private const string CloudDbBlobPath = "smart/smart_db.json";
+        private const string LegacyCloudDbBlobPath = "smart/smart_db.json";
         private const string CloudUploadsPrefix = "smart/uploads/";
 
         private static readonly object _lock = new object();
@@ -26,9 +26,13 @@ namespace SmartMarketplace
 #else
         private static readonly JavaScriptSerializer _json = new JavaScriptSerializer { MaxJsonLength = int.MaxValue, RecursionLimit = 200 };
 #endif
-        private static long _dataVersionCounter = DateTime.UtcNow.Ticks;
-        private static string _lastCloudEtag = "";
-        private static DateTime _lastEtagCheckUtc = DateTime.MinValue;
+        [ThreadStatic]
+        private static string _currentUser;
+
+        private static readonly Dictionary<string, long> _userVersions = new Dictionary<string, long>(StringComparer.OrdinalIgnoreCase);
+        private static readonly Dictionary<string, string> _userCloudEtags = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        private static readonly Dictionary<string, DateTime> _userEtagCheckedUtc = new Dictionary<string, DateTime>(StringComparer.OrdinalIgnoreCase);
+
         private static string _cachedAccessPin = "";
         private static DateTime _lastPinRefreshUtc = DateTime.MinValue;
 
@@ -37,23 +41,63 @@ namespace SmartMarketplace
         public static string DbPath { get; private set; }
         public static string BackupPath { get; private set; }
 
+        public static string CurrentUser
+        {
+            get
+            {
+                string u = UserAuthService.NormalizeUsername(_currentUser);
+                return string.IsNullOrEmpty(u) ? UserAuthService.DefaultAdminUsername : u;
+            }
+            set
+            {
+                _currentUser = UserAuthService.NormalizeUsername(value);
+            }
+        }
+
+        private static string GetCloudDbBlobPath(string username)
+        {
+            string u = UserAuthService.NormalizeUsername(username);
+            if (string.IsNullOrEmpty(u)) u = UserAuthService.DefaultAdminUsername;
+            return "smart/users/" + u + "/smart_db.json";
+        }
+
+        private static string GetLocalUserDbPath(string username)
+        {
+            string u = UserAuthService.NormalizeUsername(username);
+            if (string.IsNullOrEmpty(u)) u = UserAuthService.DefaultAdminUsername;
+            string dir = Path.Combine(DataDir, "users", u);
+            if (!Directory.Exists(dir)) Directory.CreateDirectory(dir);
+            return Path.Combine(dir, "smart_db.json");
+        }
+
+        private static string GetLocalUserBackupPath(string username)
+        {
+            return GetLocalUserDbPath(username) + ".backup.json";
+        }
+
         public static string GetDataVersion()
         {
+            string u = CurrentUser;
             if (CloudBlobStorage.IsConfigured)
             {
                 lock (_lock)
                 {
-                    if ((DateTime.UtcNow - _lastEtagCheckUtc).TotalSeconds >= 2.0)
+                    DateTime lastChk = _userEtagCheckedUtc.ContainsKey(u) ? _userEtagCheckedUtc[u] : DateTime.MinValue;
+                    if ((DateTime.UtcNow - lastChk).TotalSeconds >= 2.0)
                     {
-                        _lastEtagCheckUtc = DateTime.UtcNow;
-                        string etag = CloudBlobStorage.HeadEtag(CloudDbBlobPath);
-                        if (!string.IsNullOrEmpty(etag)) _lastCloudEtag = etag;
+                        _userEtagCheckedUtc[u] = DateTime.UtcNow;
+                        string etag = CloudBlobStorage.HeadEtag(GetCloudDbBlobPath(u));
+                        if (!string.IsNullOrEmpty(etag)) _userCloudEtags[u] = etag;
                     }
-                    if (!string.IsNullOrEmpty(_lastCloudEtag))
-                        return _lastCloudEtag.Trim('"');
+                    if (_userCloudEtags.ContainsKey(u) && !string.IsNullOrEmpty(_userCloudEtags[u]))
+                        return _userCloudEtags[u].Trim('"');
                 }
             }
-            return System.Threading.Interlocked.Read(ref _dataVersionCounter).ToString("x");
+            lock (_lock)
+            {
+                if (!_userVersions.ContainsKey(u)) _userVersions[u] = DateTime.UtcNow.Ticks;
+                return _userVersions[u].ToString("x");
+            }
         }
 
         public static string GetCachedAccessPin(bool forceRefresh = false)
@@ -86,51 +130,16 @@ namespace SmartMarketplace
             if (!Directory.Exists(DataDir)) Directory.CreateDirectory(DataDir);
             if (!Directory.Exists(UploadsDir)) Directory.CreateDirectory(UploadsDir);
 
-            if (CloudBlobStorage.IsConfigured)
-            {
-                string etag;
-                string cloudRaw = CloudBlobStorage.GetText(CloudDbBlobPath, true, out etag);
-                if (!string.IsNullOrWhiteSpace(cloudRaw))
-                {
-                    var cloudDb = TryDeserializeDb(cloudRaw);
-                    if (cloudDb != null)
-                    {
-                        EnsureDefaults(cloudDb);
-                        Security.DecryptDatabaseSecrets(cloudDb);
-                        lock (_lock)
-                        {
-                            if (!string.IsNullOrEmpty(etag)) _lastCloudEtag = etag;
-                            _cachedAccessPin = cloudDb.RemoteConfig.AccessPin;
-                            _lastPinRefreshUtc = DateTime.UtcNow;
-                        }
-                        try { File.WriteAllText(DbPath, cloudRaw, new UTF8Encoding(false)); } catch { }
-                        Console.WriteLine("[Smart] Bulut veritabanı (Vercel Private Blob) başarıyla yüklendi.");
-                        return;
-                    }
-                }
+            // Initialize user accounts (ensures default admin "nihatstark" exists securely)
+            UserAuthService.Initialize();
 
-                var initDb = CreateInitialDatabase();
-                Save(initDb);
-                Console.WriteLine("[Smart] Bulut veritabanı (Vercel Private Blob) ilk kez oluşturuldu.");
-                return;
-            }
-
-            if (!File.Exists(DbPath))
+            // Pre-load default admin database & migrate legacy smart_db.json seamlessly
+            string prevUser = _currentUser;
+            try
             {
-                if (File.Exists(BackupPath))
-                {
-                    File.Copy(BackupPath, DbPath, true);
-                }
-                else
-                {
-                    var db = CreateInitialDatabase();
-                    Save(db);
-                }
-            }
-            else
-            {
-                // Migrate any existing plaintext secrets to DPAPI AND auto-enable Live Mode where real API credentials exist
+                CurrentUser = UserAuthService.DefaultAdminUsername;
                 var existing = Load();
+                bool changed = false;
                 foreach (var mp in existing.Marketplaces)
                 {
                     if (mp.SimulationMode && MarketplaceConnectors.HasRequiredCredentials(mp))
@@ -138,22 +147,50 @@ namespace SmartMarketplace
                         mp.SimulationMode = false;
                         mp.StatusMessage = "Canlı API Modu otomatik etkinleştirildi — Gerçek hesabınıza yayınlamaya hazır";
                         AddLog(existing, "api", "info", mp.Name, mp.Name + " API anahtarları algılandı ve Canlı API Modu otomatik aktif edildi.");
+                        changed = true;
                     }
                 }
-                Save(existing);
+                if (changed) Save(existing);
+            }
+            finally
+            {
+                _currentUser = prevUser;
             }
         }
 
         public static AppDatabase Load()
         {
+            string u = CurrentUser;
             lock (_lock)
             {
                 AppDatabase db = null;
+                string userCloudPath = GetCloudDbBlobPath(u);
+                string userLocalPath = GetLocalUserDbPath(u);
+                string userBackupPath = GetLocalUserBackupPath(u);
+                bool isDefaultAdmin = string.Equals(u, UserAuthService.DefaultAdminUsername, StringComparison.OrdinalIgnoreCase);
 
                 if (CloudBlobStorage.IsConfigured)
                 {
                     string etag;
-                    string cloudRaw = CloudBlobStorage.GetText(CloudDbBlobPath, true, out etag);
+                    string cloudRaw = CloudBlobStorage.GetText(userCloudPath, true, out etag);
+                    if (string.IsNullOrWhiteSpace(cloudRaw) && isDefaultAdmin)
+                    {
+                        // Seamless one-time migration from legacy single-user smart/smart_db.json
+                        string legacyEtag;
+                        string legacyRaw = CloudBlobStorage.GetText(LegacyCloudDbBlobPath, true, out legacyEtag);
+                        if (!string.IsNullOrWhiteSpace(legacyRaw))
+                        {
+                            var migrated = TryDeserializeDb(legacyRaw);
+                            if (migrated != null)
+                            {
+                                EnsureDefaults(migrated, u);
+                                Security.DecryptDatabaseSecrets(migrated);
+                                SaveInternal(migrated, u);
+                                Console.WriteLine("[Smart] Mevcut bulut verileri '" + u + "' hesabına aktarıldı.");
+                                return migrated;
+                            }
+                        }
+                    }
                     if (!string.IsNullOrWhiteSpace(cloudRaw))
                     {
                         db = TryDeserializeDb(cloudRaw);
@@ -161,30 +198,45 @@ namespace SmartMarketplace
                         {
                             if (!string.IsNullOrEmpty(etag))
                             {
-                                _lastCloudEtag = etag;
-                                _lastEtagCheckUtc = DateTime.UtcNow;
+                                _userCloudEtags[u] = etag;
+                                _userEtagCheckedUtc[u] = DateTime.UtcNow;
                             }
-                            try { File.WriteAllText(DbPath, cloudRaw, new UTF8Encoding(false)); } catch { }
+                            try { File.WriteAllText(userLocalPath, cloudRaw, new UTF8Encoding(false)); } catch { }
                         }
                     }
                 }
 
-                if (db == null) db = TryReadFile(DbPath);
-                if (db == null && File.Exists(BackupPath))
+                if (db == null) db = TryReadFile(userLocalPath);
+                if (db == null && File.Exists(userBackupPath))
                 {
-                    db = TryReadFile(BackupPath);
-                    if (db != null) SaveInternal(db);
+                    db = TryReadFile(userBackupPath);
+                    if (db != null) SaveInternal(db, u);
+                }
+                if (db == null && isDefaultAdmin && File.Exists(DbPath))
+                {
+                    // Seamless local migration from legacy data/smart_db.json
+                    db = TryReadFile(DbPath);
+                    if (db != null)
+                    {
+                        EnsureDefaults(db, u);
+                        Security.DecryptDatabaseSecrets(db);
+                        SaveInternal(db, u);
+                        return db;
+                    }
                 }
                 if (db == null)
                 {
-                    db = CreateInitialDatabase();
-                    SaveInternal(db);
+                    db = CreateInitialDatabase(u);
+                    SaveInternal(db, u);
                 }
 
-                EnsureDefaults(db);
+                EnsureDefaults(db, u);
                 Security.DecryptDatabaseSecrets(db);
-                _cachedAccessPin = db.RemoteConfig.AccessPin;
-                _lastPinRefreshUtc = DateTime.UtcNow;
+                if (isDefaultAdmin)
+                {
+                    _cachedAccessPin = db.RemoteConfig.AccessPin;
+                    _lastPinRefreshUtc = DateTime.UtcNow;
+                }
                 return db;
             }
         }
@@ -218,10 +270,11 @@ namespace SmartMarketplace
 
         public static void Save(AppDatabase db)
         {
+            string u = CurrentUser;
             lock (_lock)
             {
-                EnsureDefaults(db);
-                SaveInternal(db);
+                EnsureDefaults(db, u);
+                SaveInternal(db, u);
             }
         }
 
@@ -238,12 +291,13 @@ namespace SmartMarketplace
 
         public static AppDatabase ImportRawJson(string rawJson)
         {
+            string u = CurrentUser;
             lock (_lock)
             {
                 var current = Load();
                 var imported = Deserialize<AppDatabase>(rawJson);
                 if (imported == null) throw new Exception("Geçersiz yedek dosyası formatı.");
-                EnsureDefaults(imported);
+                EnsureDefaults(imported, u);
                 Security.SanitizeImportedDatabase(imported);
 
                 // Preserve existing secrets if backup had stripped/masked secrets
@@ -272,12 +326,12 @@ namespace SmartMarketplace
                 }
 
                 AddLog(imported, "system", "success", "Smart", "Yedek dosyası doğrulandı ve güvenle geri yüklendi.");
-                SaveInternal(imported);
+                SaveInternal(imported, u);
                 return imported;
             }
         }
 
-        private static void SaveInternal(AppDatabase db)
+        private static void SaveInternal(AppDatabase db, string username)
         {
             if (db.Logs != null && db.Logs.Count > 300)
             {
@@ -289,30 +343,36 @@ namespace SmartMarketplace
             Security.EncryptDatabaseSecrets(diskCopy);
 
             string json = Serialize(diskCopy);
-            string tmp = DbPath + ".tmp";
+            string userLocalPath = GetLocalUserDbPath(username);
+            string userBackupPath = GetLocalUserBackupPath(username);
+            string tmp = userLocalPath + ".tmp";
             File.WriteAllText(tmp, json, new UTF8Encoding(false));
 
-            if (File.Exists(DbPath))
+            if (File.Exists(userLocalPath))
             {
-                try { File.Copy(DbPath, BackupPath, true); } catch { }
-                File.Delete(DbPath);
+                try { File.Copy(userLocalPath, userBackupPath, true); } catch { }
+                File.Delete(userLocalPath);
             }
-            File.Move(tmp, DbPath);
+            File.Move(tmp, userLocalPath);
 
-            _cachedAccessPin = db.RemoteConfig != null ? (db.RemoteConfig.AccessPin ?? "") : "";
-            _lastPinRefreshUtc = DateTime.UtcNow;
+            if (string.Equals(username, UserAuthService.DefaultAdminUsername, StringComparison.OrdinalIgnoreCase))
+            {
+                _cachedAccessPin = db.RemoteConfig != null ? (db.RemoteConfig.AccessPin ?? "") : "";
+                _lastPinRefreshUtc = DateTime.UtcNow;
+            }
 
             if (CloudBlobStorage.IsConfigured)
             {
                 string blobErr;
-                if (CloudBlobStorage.PutText(CloudDbBlobPath, json, "application/json; charset=utf-8", out blobErr))
+                if (CloudBlobStorage.PutText(GetCloudDbBlobPath(username), json, "application/json; charset=utf-8", out blobErr))
                 {
-                    _lastCloudEtag = DateTime.UtcNow.Ticks.ToString("x");
-                    _lastEtagCheckUtc = DateTime.UtcNow;
+                    _userCloudEtags[username] = DateTime.UtcNow.Ticks.ToString("x");
+                    _userEtagCheckedUtc[username] = DateTime.UtcNow;
                 }
             }
 
-            System.Threading.Interlocked.Increment(ref _dataVersionCounter);
+            long curVer = _userVersions.ContainsKey(username) ? _userVersions[username] : DateTime.UtcNow.Ticks;
+            _userVersions[username] = curVer + 1;
         }
 
         public static void AddLog(AppDatabase db, string type, string level, string marketplace, string message, string details = "")
@@ -473,18 +533,18 @@ namespace SmartMarketplace
         }
 #endif
 
-        private static AppDatabase CreateInitialDatabase()
+        private static AppDatabase CreateInitialDatabase(string username)
         {
             var db = new AppDatabase();
-            EnsureDefaults(db);
+            EnsureDefaults(db, username);
             string encMode = Security.IsCloudMode
-                ? "API anahtarları AES-256-GCM ile şifrelenir; tüm ayarlarınız ve ürünleriniz Vercel Private Blob üzerinde kalıcı saklanır."
-                : "API anahtarları Windows DPAPI ile şifrelenir; tüm ayarlarınız ve ürünleriniz kalıcı saklanır.";
-            AddLog(db, "system", "info", "Smart", "Smart Pazaryeri Otomasyon Sistemi güvenlik kalkanı ile başlatıldı.", encMode);
+                ? "API anahtarları AES-256-GCM ile şifrelenir; tüm ayarlarınız ve ürünleriniz Vercel Private Blob üzerinde hesabınıza özel kalıcı saklanır."
+                : "API anahtarları Windows DPAPI ile şifrelenir; tüm ayarlarınız ve ürünleriniz hesabınıza özel kalıcı saklanır.";
+            AddLog(db, "system", "info", "Smart", "Smart Pazaryeri Otomasyon Sistemi '" + username + "' hesabı için başlatıldı.", encMode);
             return db;
         }
 
-        private static void EnsureDefaults(AppDatabase db)
+        private static void EnsureDefaults(AppDatabase db, string username)
         {
             if (db.AiConfig == null) db.AiConfig = new AiSettings();
             if (db.SyncConfig == null) db.SyncConfig = new SyncSettings();
@@ -494,12 +554,49 @@ namespace SmartMarketplace
                 string envPin = System.Text.RegularExpressions.Regex.Replace(Environment.GetEnvironmentVariable("SMART_ACCESS_PIN") ?? "", @"\D+", "");
                 db.RemoteConfig.AccessPin = envPin.Length == 6 ? envPin : Security.Generate6DigitPin();
             }
+            if (db.UserProfile == null)
+            {
+                var acct = UserAuthService.GetUser(username, false);
+                string disp = acct != null && !string.IsNullOrWhiteSpace(acct.DisplayName) ? acct.DisplayName : username;
+                db.UserProfile = new UserProfileSettings
+                {
+                    DisplayName = disp,
+                    AvatarInitials = BuildInitials(disp)
+                };
+            }
+            if (string.IsNullOrWhiteSpace(db.UserProfile.DisplayName))
+                db.UserProfile.DisplayName = username;
+            if (string.IsNullOrWhiteSpace(db.UserProfile.AvatarInitials))
+                db.UserProfile.AvatarInitials = BuildInitials(db.UserProfile.DisplayName);
+            if (string.IsNullOrWhiteSpace(db.UserProfile.PanelTitle))
+                db.UserProfile.PanelTitle = "Smart";
+            if (string.IsNullOrWhiteSpace(db.UserProfile.StoreName))
+                db.UserProfile.StoreName = "Pazaryeri Otomasyonu";
+            if (string.IsNullOrWhiteSpace(db.UserProfile.Theme))
+                db.UserProfile.Theme = "khaki";
+            if (string.IsNullOrWhiteSpace(db.UserProfile.AvatarColor))
+                db.UserProfile.AvatarColor = "khaki";
+            if (string.IsNullOrWhiteSpace(db.UserProfile.Density))
+                db.UserProfile.Density = "comfortable";
+            if (string.IsNullOrWhiteSpace(db.UserProfile.DefaultView))
+                db.UserProfile.DefaultView = "dashboard";
+
             if (db.Draft == null) db.Draft = new DraftWorkspace();
             if (db.Draft.UploadedImages == null) db.Draft.UploadedImages = new List<string>();
             if (db.Draft.SelectedTargetMps == null) db.Draft.SelectedTargetMps = new List<string>();
             if (db.Products == null) db.Products = new List<ProductRecord>();
             if (db.Logs == null) db.Logs = new List<ActivityLog>();
             EnsureAllMarketplaces(db);
+        }
+
+        public static string BuildInitials(string name)
+        {
+            if (string.IsNullOrWhiteSpace(name)) return "SM";
+            var parts = name.Trim().Split(new[] { ' ', '.', '_', '-' }, StringSplitOptions.RemoveEmptyEntries);
+            if (parts.Length >= 2)
+                return (parts[0].Substring(0, 1) + parts[1].Substring(0, 1)).ToUpperInvariant();
+            string s = parts[0];
+            return (s.Length >= 2 ? s.Substring(0, 2) : s).ToUpperInvariant();
         }
 
         private static void EnsureAllMarketplaces(AppDatabase db)

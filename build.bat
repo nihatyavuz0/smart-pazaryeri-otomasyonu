@@ -21,6 +21,7 @@ del /f /q "%TMPEXE%" >nul 2>&1
     "%~dp0backend\Models.cs" ^
     "%~dp0backend\CloudBlobStorage.cs" ^
     "%~dp0backend\Security.cs" ^
+    "%~dp0backend\UserAuthService.cs" ^
     "%~dp0backend\ComplianceGuard.cs" ^
     "%~dp0backend\ImageHostService.cs" ^
     "%~dp0backend\Storage.cs" ^

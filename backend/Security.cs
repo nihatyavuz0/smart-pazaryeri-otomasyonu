@@ -67,6 +67,118 @@ namespace SmartMarketplace
             }
         }
 
+        public static string SignUserSessionPayload(string payload)
+        {
+            byte[] key = _cloudSessionKeyBytes ?? _cloudKeyBytes;
+            return ComputeHmacHex(key, "smart-user-sess-v1:" + (payload ?? ""));
+        }
+
+        public static string HashPassword(string password)
+        {
+            const int iterations = 100000;
+            byte[] salt = new byte[16];
+            using (var rng = new RNGCryptoServiceProvider())
+            {
+                rng.GetBytes(salt);
+            }
+            byte[] hash;
+#if NET8_0_OR_GREATER
+            using (var pbkdf2 = new Rfc2898DeriveBytes(password ?? "", salt, iterations, HashAlgorithmName.SHA256))
+            {
+                hash = pbkdf2.GetBytes(32);
+            }
+#else
+            using (var pbkdf2 = new Rfc2898DeriveBytes(password ?? "", salt, iterations))
+            {
+                hash = pbkdf2.GetBytes(32);
+            }
+#endif
+            string algo =
+#if NET8_0_OR_GREATER
+                "pbkdf2-sha256";
+#else
+                "pbkdf2-sha1";
+#endif
+            return algo + ":" + iterations + ":" + Convert.ToBase64String(salt) + ":" + Convert.ToBase64String(hash);
+        }
+
+        public static bool VerifyPassword(string password, string storedHash)
+        {
+            if (string.IsNullOrEmpty(password) || string.IsNullOrEmpty(storedHash)) return false;
+            try
+            {
+                var parts = storedHash.Split(':');
+                if (parts.Length != 4) return false;
+                string algo = parts[0];
+                int iterations;
+                if (!int.TryParse(parts[1], out iterations) || iterations < 10000 || iterations > 500000) return false;
+                byte[] salt = Convert.FromBase64String(parts[2]);
+                byte[] expected = Convert.FromBase64String(parts[3]);
+                byte[] actual;
+#if NET8_0_OR_GREATER
+                var hashAlg = algo == "pbkdf2-sha1" ? HashAlgorithmName.SHA1 : HashAlgorithmName.SHA256;
+                using (var pbkdf2 = new Rfc2898DeriveBytes(password, salt, iterations, hashAlg))
+                {
+                    actual = pbkdf2.GetBytes(expected.Length);
+                }
+#else
+                if (algo == "pbkdf2-sha256")
+                {
+                    actual = Pbkdf2Sha256Fallback(password, salt, iterations, expected.Length);
+                }
+                else
+                {
+                    using (var pbkdf2 = new Rfc2898DeriveBytes(password, salt, iterations))
+                    {
+                        actual = pbkdf2.GetBytes(expected.Length);
+                    }
+                }
+#endif
+                if (actual.Length != expected.Length) return false;
+                int diff = 0;
+                for (int i = 0; i < actual.Length; i++) diff |= (actual[i] ^ expected[i]);
+                return diff == 0;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+#if !NET8_0_OR_GREATER
+        private static byte[] Pbkdf2Sha256Fallback(string password, byte[] salt, int iterations, int outputBytes)
+        {
+            byte[] pwdBytes = Encoding.UTF8.GetBytes(password);
+            using (var hmac = new HMACSHA256(pwdBytes))
+            {
+                int hashLen = 32;
+                int blockCount = (outputBytes + hashLen - 1) / hashLen;
+                byte[] result = new byte[outputBytes];
+                int offset = 0;
+                for (int block = 1; block <= blockCount; block++)
+                {
+                    byte[] blockSalt = new byte[salt.Length + 4];
+                    Buffer.BlockCopy(salt, 0, blockSalt, 0, salt.Length);
+                    blockSalt[salt.Length] = (byte)(block >> 24);
+                    blockSalt[salt.Length + 1] = (byte)(block >> 16);
+                    blockSalt[salt.Length + 2] = (byte)(block >> 8);
+                    blockSalt[salt.Length + 3] = (byte)(block);
+                    byte[] u = hmac.ComputeHash(blockSalt);
+                    byte[] t = (byte[])u.Clone();
+                    for (int i = 1; i < iterations; i++)
+                    {
+                        u = hmac.ComputeHash(u);
+                        for (int j = 0; j < hashLen; j++) t[j] ^= u[j];
+                    }
+                    int copyLen = Math.Min(hashLen, outputBytes - offset);
+                    Buffer.BlockCopy(t, 0, result, offset, copyLen);
+                    offset += copyLen;
+                }
+                return result;
+            }
+        }
+#endif
+
         public static string GetExpectedRemoteCookieToken(string currentPin)
         {
             if (IsCloudMode && _cloudSessionKeyBytes != null && !string.IsNullOrWhiteSpace(currentPin))
