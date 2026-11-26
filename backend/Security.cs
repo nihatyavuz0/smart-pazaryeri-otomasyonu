@@ -12,7 +12,11 @@ namespace SmartMarketplace
     {
         private static readonly byte[] _dpapiEntropy = Encoding.UTF8.GetBytes("SmartMarketplace-DPAPI-v1-Salt-2026");
         private static readonly object _rateLock = new object();
-        private static readonly Dictionary<string, List<DateTime>> _rateBuckets = new Dictionary<string, List<DateTime>>();
+        private static readonly Dictionary<string, List<DateTime>> _rateBuckets = new Dictionary<string, List<DateTime>>(StringComparer.Ordinal);
+        private static readonly Dictionary<string, DateTime> _lockoutUntil = new Dictionary<string, DateTime>(StringComparer.OrdinalIgnoreCase);
+        private static DateTime _lastRateSweepUtc = DateTime.UtcNow;
+        private const int MaxRateBuckets = 10000;
+        private static readonly string _dummyPbkdf2Hash;
 
         public const string EncryptedPrefix = "dpapi:v1:";
         public const string AesEncryptedPrefix = "aesgcm:v1:";
@@ -23,6 +27,7 @@ namespace SmartMarketplace
         public static volatile string ActiveTunnelHost = "";
         private static readonly byte[] _cloudKeyBytes;
         private static readonly byte[] _cloudSessionKeyBytes;
+        private static readonly byte[] _csrfKeyBytes;
 
         static Security()
         {
@@ -39,11 +44,22 @@ namespace SmartMarketplace
 
             using (var sha = SHA256.Create())
             {
-                string keyMat = !string.IsNullOrEmpty(encSeed) ? encSeed : (!string.IsNullOrEmpty(sessSeed) ? sessSeed : (!string.IsNullOrEmpty(blobSeed) ? blobSeed : "SmartMarketplace-Local-Fallback-Key-2026"));
+                string keyMat = !string.IsNullOrEmpty(encSeed)
+                    ? encSeed
+                    : (!string.IsNullOrEmpty(sessSeed)
+                        ? sessSeed
+                        : (!string.IsNullOrEmpty(blobSeed) ? blobSeed : GenerateSecureToken(32)));
                 _cloudKeyBytes = sha.ComputeHash(Encoding.UTF8.GetBytes("enc:" + keyMat));
 
-                string sessMat = !string.IsNullOrEmpty(sessSeed) ? sessSeed : (!string.IsNullOrEmpty(encSeed) ? encSeed : (!string.IsNullOrEmpty(blobSeed) ? blobSeed : ""));
+                string sessMat = !string.IsNullOrEmpty(sessSeed)
+                    ? sessSeed
+                    : (!string.IsNullOrEmpty(encSeed)
+                        ? encSeed
+                        : (!string.IsNullOrEmpty(blobSeed) ? blobSeed : ""));
                 _cloudSessionKeyBytes = !string.IsNullOrEmpty(sessMat) ? sha.ComputeHash(Encoding.UTF8.GetBytes("sess:" + sessMat)) : null;
+
+                byte[] csrfSeed = _cloudSessionKeyBytes ?? sha.ComputeHash(Encoding.UTF8.GetBytes("local-csrf:" + GenerateSecureToken(32)));
+                _csrfKeyBytes = sha.ComputeHash(Encoding.UTF8.GetBytes("csrf:" + Convert.ToBase64String(csrfSeed)));
             }
 
             if (IsCloudMode && _cloudSessionKeyBytes != null)
@@ -56,6 +72,34 @@ namespace SmartMarketplace
                 SessionToken = GenerateSecureToken(32);
                 RemoteAuthCookieToken = GenerateSecureToken(32);
             }
+
+            _dummyPbkdf2Hash = HashPassword("dummy-timing-shield-" + GenerateSecureToken(12));
+        }
+
+        public static void VerifyDummyPassword(string password)
+        {
+            // Constant-work timing shield so attackers cannot enumerate valid usernames by latency
+            VerifyPassword(string.IsNullOrEmpty(password) ? "x" : password, _dummyPbkdf2Hash);
+        }
+
+        public static string GetUserCsrfToken(string username, int sessionVersion)
+        {
+            string norm = UserAuthService.NormalizeUsername(username);
+            if (string.IsNullOrEmpty(norm)) return SessionToken;
+            return ComputeHmacHex(_csrfKeyBytes, "smart-csrf-v2:" + norm + ":" + Math.Max(1, sessionVersion));
+        }
+
+        public static bool IsValidUserSessionToken(Dictionary<string, string> headers, UserAccountRecord user)
+        {
+            if (headers == null || !headers.ContainsKey("X-Smart-Token")) return false;
+            string provided = (headers["X-Smart-Token"] ?? "").Trim();
+            if (string.IsNullOrEmpty(provided)) return false;
+            if (user != null)
+            {
+                string expectedUserToken = GetUserCsrfToken(user.Username, user.SessionVersion);
+                if (FixedTimeEquals(provided, expectedUserToken)) return true;
+            }
+            return false;
         }
 
         private static string ComputeHmacHex(byte[] key, string message)
@@ -266,8 +310,9 @@ namespace SmartMarketplace
                 Buffer.BlockCopy(cipher, 0, combined, nonce.Length + tag.Length, cipher.Length);
                 return AesEncryptedPrefix + Convert.ToBase64String(combined);
             }
-            catch
+            catch (Exception ex)
             {
+                if (IsCloudMode) throw new InvalidOperationException("Bulut şifreleme hatası: gizli anahtar düz metin olarak saklanamaz.", ex);
                 return plain;
             }
 #else
@@ -345,6 +390,10 @@ namespace SmartMarketplace
             {
                 db.RemoteConfig.AccessPin = EncryptSecret(db.RemoteConfig.AccessPin);
             }
+            if (db.SyncConfig != null && !string.IsNullOrWhiteSpace(db.SyncConfig.WebhookToken))
+            {
+                db.SyncConfig.WebhookToken = EncryptSecret(db.SyncConfig.WebhookToken);
+            }
             if (db.Marketplaces != null)
             {
                 foreach (var mp in db.Marketplaces)
@@ -371,6 +420,10 @@ namespace SmartMarketplace
             if (db.RemoteConfig != null)
             {
                 db.RemoteConfig.AccessPin = DecryptSecret(db.RemoteConfig.AccessPin);
+            }
+            if (db.SyncConfig != null && !string.IsNullOrWhiteSpace(db.SyncConfig.WebhookToken))
+            {
+                db.SyncConfig.WebhookToken = DecryptSecret(db.SyncConfig.WebhookToken);
             }
             if (db.Marketplaces != null)
             {
@@ -497,7 +550,10 @@ namespace SmartMarketplace
             if (colon > 0) h = h.Substring(0, colon);
 
             if (h == "localhost" || h == "127.0.0.1") return true;
-            if (h.EndsWith(".vercel.app")) return true;
+            // Strictly allow ONLY this project's Vercel production/preview hostnames — NEVER arbitrary *.vercel.app!
+            if (h == "smart-pazaryeri-otomasyonu.vercel.app"
+                || (h.StartsWith("smart-pazaryeri-otomasyonu-") && h.EndsWith(".vercel.app")))
+                return true;
 
             string[] envHosts =
             {
@@ -554,52 +610,61 @@ namespace SmartMarketplace
         public static bool IsValidOriginHeader(Dictionary<string, string> headers, int port, string method = "GET")
         {
             if (headers == null) return true;
+            bool isSafeRead = string.Equals(method, "GET", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(method, "HEAD", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(method, "OPTIONS", StringComparison.OrdinalIgnoreCase);
+
             if (headers.ContainsKey("Origin"))
             {
                 string origin = (headers["Origin"] ?? "").Trim().ToLowerInvariant();
-                if (!string.IsNullOrEmpty(origin) && origin != "null")
+                if (!string.IsNullOrEmpty(origin))
                 {
-                    bool allowed = origin == ("http://localhost:" + port)
-                        || origin == ("http://127.0.0.1:" + port);
-
-                    if (!allowed && IsCloudMode)
+                    // Reject Origin: null on all state-changing requests (blocks sandboxed iframe CSRF)
+                    if (origin == "null")
                     {
-                        Uri parsedOrigin;
-                        if (Uri.TryCreate(origin, UriKind.Absolute, out parsedOrigin)
-                            && (parsedOrigin.Scheme == Uri.UriSchemeHttps || parsedOrigin.Scheme == Uri.UriSchemeHttp)
-                            && IsAllowedCloudHost(parsedOrigin.Host))
-                        {
-                            allowed = true;
-                        }
+                        if (!isSafeRead) return false;
                     }
+                    else
+                    {
+                        bool allowed = origin == ("http://localhost:" + port)
+                            || origin == ("http://127.0.0.1:" + port);
 
-                    string tunnelHost = ActiveTunnelHost;
-                    if (!allowed && !string.IsNullOrEmpty(tunnelHost))
-                    {
-                        string th = tunnelHost.ToLowerInvariant();
-                        if (origin == ("https://" + th) || origin == ("https://" + th + ":443"))
-                            allowed = true;
-                    }
-                    if (!allowed)
-                    {
-                        foreach (var lanIp in GetLocalLanIpv4Addresses())
+                        if (!allowed && IsCloudMode)
                         {
-                            if (origin == ("http://" + lanIp + ":" + port))
+                            Uri parsedOrigin;
+                            if (Uri.TryCreate(origin, UriKind.Absolute, out parsedOrigin)
+                                && (parsedOrigin.Scheme == Uri.UriSchemeHttps || (parsedOrigin.Scheme == Uri.UriSchemeHttp && (parsedOrigin.Host == "localhost" || parsedOrigin.Host == "127.0.0.1")))
+                                && IsAllowedCloudHost(parsedOrigin.Host))
                             {
                                 allowed = true;
-                                break;
                             }
                         }
+
+                        string tunnelHost = ActiveTunnelHost;
+                        if (!allowed && !string.IsNullOrEmpty(tunnelHost))
+                        {
+                            string th = tunnelHost.ToLowerInvariant();
+                            if (origin == ("https://" + th) || origin == ("https://" + th + ":443"))
+                                allowed = true;
+                        }
+                        if (!allowed)
+                        {
+                            foreach (var lanIp in GetLocalLanIpv4Addresses())
+                            {
+                                if (origin == ("http://" + lanIp + ":" + port))
+                                {
+                                    allowed = true;
+                                    break;
+                                }
+                            }
+                        }
+                        if (!allowed) return false;
                     }
-                    if (!allowed) return false;
                 }
             }
             if (headers.ContainsKey("Sec-Fetch-Site"))
             {
                 string sfs = (headers["Sec-Fetch-Site"] ?? "").Trim().ToLowerInvariant();
-                bool isSafeRead = string.Equals(method, "GET", StringComparison.OrdinalIgnoreCase)
-                    || string.Equals(method, "HEAD", StringComparison.OrdinalIgnoreCase)
-                    || string.Equals(method, "OPTIONS", StringComparison.OrdinalIgnoreCase);
                 if (sfs == "cross-site" && !isSafeRead) return false;
             }
             return true;
@@ -611,19 +676,102 @@ namespace SmartMarketplace
             return FixedTimeEquals(headers["X-Smart-Token"].Trim(), SessionToken);
         }
 
-        public static bool CheckRateLimit(string bucket, int maxPerMinute)
+        public static bool CheckRateLimit(string bucket, int maxPerWindow, int windowSeconds = 60)
         {
             lock (_rateLock)
             {
                 DateTime now = DateTime.UtcNow;
-                DateTime cutoff = now.AddMinutes(-1);
-                if (!_rateBuckets.ContainsKey(bucket)) _rateBuckets[bucket] = new List<DateTime>();
+                SweepRateBucketsIfNeeded(now);
+                DateTime cutoff = now.AddSeconds(-Math.Max(1, windowSeconds));
+                if (!_rateBuckets.ContainsKey(bucket))
+                {
+                    if (_rateBuckets.Count >= MaxRateBuckets)
+                    {
+                        // Evict oldest empty/stale buckets before inserting
+                        var toRemove = _rateBuckets.Where(kv => kv.Value.Count == 0 || kv.Value[kv.Value.Count - 1] < now.AddMinutes(-10)).Select(kv => kv.Key).Take(2000).ToList();
+                        foreach (var rk in toRemove) _rateBuckets.Remove(rk);
+                        if (_rateBuckets.Count >= MaxRateBuckets)
+                        {
+                            var oldestKey = _rateBuckets.Keys.FirstOrDefault();
+                            if (oldestKey != null) _rateBuckets.Remove(oldestKey);
+                        }
+                    }
+                    _rateBuckets[bucket] = new List<DateTime>();
+                }
                 var list = _rateBuckets[bucket];
                 list.RemoveAll(t => t < cutoff);
-                if (list.Count >= maxPerMinute) return false;
+                if (list.Count >= maxPerWindow) return false;
                 list.Add(now);
                 return true;
             }
+        }
+
+        public static bool IsLoginLockedOut(string key, out int remainingSeconds)
+        {
+            remainingSeconds = 0;
+            if (string.IsNullOrWhiteSpace(key)) return false;
+            lock (_rateLock)
+            {
+                DateTime until;
+                if (_lockoutUntil.TryGetValue(key, out until))
+                {
+                    DateTime now = DateTime.UtcNow;
+                    if (until > now)
+                    {
+                        remainingSeconds = (int)Math.Ceiling((until - now).TotalSeconds);
+                        return true;
+                    }
+                    _lockoutUntil.Remove(key);
+                }
+                return false;
+            }
+        }
+
+        public static void RecordFailedLogin(string key, int maxAttempts = 6, int lockoutMinutes = 10)
+        {
+            if (string.IsNullOrWhiteSpace(key)) return;
+            string bucket = "fail_login:" + key.ToLowerInvariant();
+            lock (_rateLock)
+            {
+                DateTime now = DateTime.UtcNow;
+                DateTime cutoff = now.AddMinutes(-lockoutMinutes);
+                if (!_rateBuckets.ContainsKey(bucket)) _rateBuckets[bucket] = new List<DateTime>();
+                var list = _rateBuckets[bucket];
+                list.RemoveAll(t => t < cutoff);
+                list.Add(now);
+                if (list.Count >= maxAttempts)
+                {
+                    _lockoutUntil[key] = now.AddMinutes(lockoutMinutes);
+                    list.Clear();
+                }
+            }
+        }
+
+        public static void ClearFailedLogins(string key)
+        {
+            if (string.IsNullOrWhiteSpace(key)) return;
+            lock (_rateLock)
+            {
+                _lockoutUntil.Remove(key);
+                _rateBuckets.Remove("fail_login:" + key.ToLowerInvariant());
+            }
+        }
+
+        private static void SweepRateBucketsIfNeeded(DateTime now)
+        {
+            if ((now - _lastRateSweepUtc).TotalMinutes < 5) return;
+            _lastRateSweepUtc = now;
+            DateTime staleCutoff = now.AddMinutes(-15);
+            var deadKeys = new List<string>();
+            foreach (var kv in _rateBuckets)
+            {
+                kv.Value.RemoveAll(t => t < staleCutoff);
+                if (kv.Value.Count == 0) deadKeys.Add(kv.Key);
+            }
+            foreach (var k in deadKeys) _rateBuckets.Remove(k);
+
+            var expiredLocks = _lockoutUntil.Where(kv => kv.Value <= now).Select(kv => kv.Key).ToList();
+            foreach (var lk in expiredLocks) _lockoutUntil.Remove(lk);
         }
 
         // ==================== PATH TRAVERSAL & UPLOAD SAFETY ====================
@@ -698,14 +846,107 @@ namespace SmartMarketplace
             return clean;
         }
 
+        public static bool IsValidUploadFileName(string fileName)
+        {
+            if (string.IsNullOrWhiteSpace(fileName)) return false;
+            return Regex.IsMatch(fileName, @"^[A-Za-z0-9_\-]{3,120}\.(jpg|jpeg|png|webp)$", RegexOptions.IgnoreCase);
+        }
+
+        /// <summary>
+        /// DNS-resolved SSRF Guard: allows ONLY public HTTPS URLs on port 443.
+        /// Blocks localhost, RFC1918 private LANs, cloud metadata (169.254.169.254), CGNAT, link-local, multicast, and IPv6 ULA!
+        /// </summary>
+        public static bool IsSafePublicExternalUrl(string url)
+        {
+            if (string.IsNullOrWhiteSpace(url)) return false;
+            Uri parsed;
+            if (!Uri.TryCreate(url.Trim(), UriKind.Absolute, out parsed)) return false;
+            if (parsed.Scheme != Uri.UriSchemeHttps) return false;
+            if (!string.IsNullOrEmpty(parsed.UserInfo)) return false;
+            if (parsed.Port != 443) return false;
+
+            string host = (parsed.Host ?? "").Trim().ToLowerInvariant();
+            if (string.IsNullOrWhiteSpace(host) || host == "localhost" || host.EndsWith(".local") || host.EndsWith(".internal") || host.EndsWith(".localhost"))
+                return false;
+
+            // Block raw IP literals (prevents direct metadata/LAN probing)
+            System.Net.IPAddress literalIp;
+            if (System.Net.IPAddress.TryParse(host.Trim('[', ']'), out literalIp))
+                return false;
+
+            try
+            {
+                var addrs = System.Net.Dns.GetHostAddresses(host);
+                if (addrs == null || addrs.Length == 0) return false;
+                foreach (var addr in addrs)
+                {
+                    if (IsDisallowedSsrfIp(addr)) return false;
+                }
+                return true;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        private static bool IsDisallowedSsrfIp(System.Net.IPAddress ip)
+        {
+            if (ip == null) return true;
+            if (System.Net.IPAddress.IsLoopback(ip)) return true;
+            if (ip.Equals(System.Net.IPAddress.Any) || ip.Equals(System.Net.IPAddress.IPv6Any) || ip.Equals(System.Net.IPAddress.Broadcast))
+                return true;
+            if (ip.IsIPv4MappedToIPv6) ip = ip.MapToIPv4();
+
+            if (ip.AddressFamily == System.Net.Sockets.AddressFamily.InterNetwork)
+            {
+                byte[] b = ip.GetAddressBytes();
+                if (b[0] == 0) return true;                                  // 0.0.0.0/8
+                if (b[0] == 10) return true;                                 // 10.0.0.0/8
+                if (b[0] == 100 && b[1] >= 64 && b[1] <= 127) return true;   // 100.64.0.0/10 (CGNAT)
+                if (b[0] == 127) return true;                                // 127.0.0.0/8
+                if (b[0] == 169 && b[1] == 254) return true;                 // 169.254.0.0/16 (AWS/GCP/Azure Metadata!)
+                if (b[0] == 172 && b[1] >= 16 && b[1] <= 31) return true;    // 172.16.0.0/12
+                if (b[0] == 192 && b[1] == 0 && b[2] == 0) return true;      // 192.0.0.0/24
+                if (b[0] == 192 && b[1] == 0 && b[2] == 2) return true;      // TEST-NET-1
+                if (b[0] == 192 && b[1] == 168) return true;                 // 192.168.0.0/16
+                if (b[0] == 198 && (b[1] == 18 || b[1] == 19)) return true;  // 198.18.0.0/15
+                if (b[0] >= 224) return true;                                // Multicast & reserved
+                return false;
+            }
+            if (ip.AddressFamily == System.Net.Sockets.AddressFamily.InterNetworkV6)
+            {
+                if (ip.IsIPv6LinkLocal || ip.IsIPv6Multicast || ip.IsIPv6SiteLocal || ip.IsIPv6Teredo) return true;
+                byte[] b = ip.GetAddressBytes();
+                if ((b[0] & 0xFE) == 0xFC) return true; // fc00::/7 Unique Local
+                return false;
+            }
+            return true;
+        }
+
         public static bool IsSafeImageUrl(string url)
         {
             if (string.IsNullOrWhiteSpace(url)) return false;
-            if (url.StartsWith("/uploads/") && !url.Contains("..") && !url.Contains("\\") && !url.Contains("\"") && !url.Contains("'"))
-                return true;
+            string s = url.Trim();
+            if (s.Contains("\r") || s.Contains("\n") || s.Contains("\"") || s.Contains("'") || s.Contains("<") || s.Contains(">") || s.Contains(" "))
+                return false;
+            if (s.StartsWith("/uploads/"))
+            {
+                string fn = s.Substring("/uploads/".Length);
+                return IsValidUploadFileName(fn);
+            }
             Uri parsed;
-            if (Uri.TryCreate(url, UriKind.Absolute, out parsed))
-                return parsed.Scheme == Uri.UriSchemeHttps;
+            if (Uri.TryCreate(s, UriKind.Absolute, out parsed))
+            {
+                if (parsed.Scheme != Uri.UriSchemeHttps || !string.IsNullOrEmpty(parsed.UserInfo) || parsed.Port != 443)
+                    return false;
+                string h = (parsed.Host ?? "").ToLowerInvariant();
+                if (string.IsNullOrEmpty(h) || h == "localhost" || h.EndsWith(".local") || h.EndsWith(".internal"))
+                    return false;
+                System.Net.IPAddress ip;
+                if (System.Net.IPAddress.TryParse(h.Trim('[', ']'), out ip)) return false;
+                return true;
+            }
             return false;
         }
 
@@ -714,7 +955,9 @@ namespace SmartMarketplace
             if (string.IsNullOrEmpty(text)) return "";
             string s = text;
             s = Regex.Replace(s, @"(Authorization\s*:\s*(?:Basic|Bearer)\s+)[^\s""']+", "$1[GİZLENDİ]", RegexOptions.IgnoreCase);
-            s = Regex.Replace(s, @"((?:api[_-]?key|api[_-]?secret|access[_-]?token|refresh[_-]?token|password|client[_-]?secret)[""']?\s*[:=]\s*[""']?)[^""'\s,&}]+", "$1[GİZLENDİ]", RegexOptions.IgnoreCase);
+            s = Regex.Replace(s, @"((?:api[_-]?key|api[_-]?secret|access[_-]?token|refresh[_-]?token|webhook[_-]?token|password|client[_-]?secret|appsecret|servicekey|x-api-key|x-smart-token|x-smart-webhook-token)[""']?\s*[:=]\s*[""']?)[^""'\s,&}]+", "$1[GİZLENDİ]", RegexOptions.IgnoreCase);
+            s = Regex.Replace(s, @"((?:smart_user_session|smart_remote_auth|token)=)[^;\s&""']+", "$1[GİZLENDİ]", RegexOptions.IgnoreCase);
+            s = Regex.Replace(s, @"(vercel_blob_rw_[A-Za-z0-9_\-]+)", "[GİZLENDİ]", RegexOptions.IgnoreCase);
             s = Regex.Replace(s, @"(AIza[0-9A-Za-z\-_]{20,})", "[GİZLENDİ]");
             s = Regex.Replace(s, @"(sk-[0-9A-Za-z\-_]{20,})", "[GİZLENDİ]");
             return s;
@@ -738,6 +981,17 @@ namespace SmartMarketplace
             if (db.Draft != null && db.Draft.UploadedImages != null)
             {
                 db.Draft.UploadedImages = db.Draft.UploadedImages.Where(IsSafeImageUrl).Take(12).ToList();
+            }
+            if (db.UserProfile != null)
+            {
+                if (!string.IsNullOrWhiteSpace(db.UserProfile.AvatarUrl) && !IsSafeImageUrl(db.UserProfile.AvatarUrl))
+                    db.UserProfile.AvatarUrl = "";
+                if (!string.IsNullOrEmpty(db.UserProfile.DisplayName) && db.UserProfile.DisplayName.Length > 60)
+                    db.UserProfile.DisplayName = db.UserProfile.DisplayName.Substring(0, 60);
+                if (!string.IsNullOrEmpty(db.UserProfile.Bio) && db.UserProfile.Bio.Length > 240)
+                    db.UserProfile.Bio = db.UserProfile.Bio.Substring(0, 240);
+                if (!string.IsNullOrEmpty(db.UserProfile.Email) && db.UserProfile.Email.Length > 100)
+                    db.UserProfile.Email = db.UserProfile.Email.Substring(0, 100);
             }
             if (db.SyncConfig != null)
             {

@@ -2,7 +2,7 @@
 // SMART — Hardened Frontend Controller (Zero inline JS, CSP strict)
 // ==========================================================
 
-const SESSION_TOKEN = (() => {
+let SESSION_TOKEN = (() => {
   const meta = document.querySelector('meta[name="smart-token"]');
   return meta ? meta.getAttribute('content') || '' : '';
 })();
@@ -1026,7 +1026,8 @@ function renderGeneratedPreview(engineUsed) {
   const visionEl = document.getElementById('vision-summary-box');
   if (visionEl) {
     if (v && v.Analyzed) {
-      const swatch = v.DominantColorHex ? `<span class="color-swatch" style="background:${escAttr(v.DominantColorHex)}"></span>` : '';
+      const safeHex = (v.DominantColorHex && /^#[0-9a-fA-F]{3,8}$/.test(String(v.DominantColorHex).trim())) ? String(v.DominantColorHex).trim() : '';
+      const swatch = safeHex ? `<span class="color-swatch" style="background:${safeHex}"></span>` : '';
       const vFeats = (v.VisualFeatures || []).map(f => `<span class="kw-tag">${esc(f)}</span>`).join('');
       visionEl.innerHTML = `
         <div class="vision-head">
@@ -2669,7 +2670,11 @@ async function handleLogout() {
   });
   if (!confirmed) return;
   try {
-    await fetch('/api/auth/logout', { method: 'POST', credentials: 'same-origin' });
+    await fetch('/api/auth/logout', {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { 'X-Smart-Token': SESSION_TOKEN }
+    });
   } catch { }
   window.location.replace('/?loggedout=' + Date.now());
 }
@@ -2685,7 +2690,8 @@ async function handleLogoutAll() {
   });
   if (!confirmed) return;
   try {
-    await apiFetch('/api/auth/logout-all', { method: 'POST', body: '{}' });
+    const res = await apiFetch('/api/auth/logout-all', { method: 'POST', body: '{}' });
+    if (res && res.csrfToken) SESSION_TOKEN = res.csrfToken;
     toast('Diğer tüm cihazlardaki oturumlar başarıyla kapatıldı.', 'success');
   } catch (err) {
     toast('İşlem başarısız: ' + err.message, 'error');
@@ -2809,8 +2815,8 @@ function bindAccountEvents() {
     const newPwd = newEl?.value || '';
     const newPwd2 = new2El?.value || '';
 
-    if (newPwd.length < 6) {
-      toast('Yeni şifre en az 6 karakter olmalıdır.', 'error');
+    if (newPwd.length < 8) {
+      toast('Güvenlik nedeniyle yeni şifre en az 8 karakter olmalıdır.', 'error');
       return;
     }
     if (newPwd !== newPwd2) {
@@ -2818,10 +2824,11 @@ function bindAccountEvents() {
       return;
     }
     try {
-      await apiFetch('/api/account/password', {
+      const res = await apiFetch('/api/account/password', {
         method: 'POST',
         body: JSON.stringify({ currentPassword: curPwd, newPassword: newPwd })
       });
+      if (res && res.csrfToken) SESSION_TOKEN = res.csrfToken;
       if (curEl) curEl.value = '';
       if (newEl) newEl.value = '';
       if (new2El) new2El.value = '';

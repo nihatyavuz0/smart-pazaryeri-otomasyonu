@@ -96,9 +96,18 @@ namespace SmartMarketplace
         {
             error = "";
             string norm = NormalizeUsername(rawUsername);
-            if (string.IsNullOrEmpty(norm) || string.IsNullOrEmpty(password))
+            if (string.IsNullOrEmpty(norm) || string.IsNullOrEmpty(password) || password.Length > 256)
             {
+                Security.VerifyDummyPassword(password);
                 error = "Kullanıcı adı ve şifre gereklidir.";
+                return null;
+            }
+
+            int lockRemain;
+            if (Security.IsLoginLockedOut("acct:" + norm, out lockRemain))
+            {
+                int mins = Math.Max(1, (int)Math.Ceiling(lockRemain / 60.0));
+                error = "Bu hesap art arda hatalı girişler nedeniyle geçici olarak kilitlendi. Lütfen yaklaşık " + mins + " dakika sonra tekrar deneyin.";
                 return null;
             }
 
@@ -107,11 +116,20 @@ namespace SmartMarketplace
                 var store = GetStore(true);
                 EnsureDefaultAdmin(store);
                 var user = store.Users.Find(u => string.Equals(u.Username, norm, StringComparison.OrdinalIgnoreCase));
-                if (user == null || !Security.VerifyPassword(password, user.PasswordHash))
+                if (user == null)
                 {
+                    Security.VerifyDummyPassword(password);
+                    Security.RecordFailedLogin("acct:" + norm, 6, 10);
                     error = "Kullanıcı adı veya şifre hatalı.";
                     return null;
                 }
+                if (!Security.VerifyPassword(password, user.PasswordHash))
+                {
+                    Security.RecordFailedLogin("acct:" + norm, 6, 10);
+                    error = "Kullanıcı adı veya şifre hatalı.";
+                    return null;
+                }
+                Security.ClearFailedLogins("acct:" + norm);
                 user.LastLoginAt = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss");
                 SaveStoreInternal(store);
                 return user;
@@ -148,7 +166,7 @@ namespace SmartMarketplace
                     break;
                 }
             }
-            if (string.IsNullOrWhiteSpace(token)) return null;
+            if (string.IsNullOrWhiteSpace(token) || token.Length > 256) return null;
 
             var parts = token.Split('.');
             if (parts.Length != 4) return null;
@@ -182,9 +200,9 @@ namespace SmartMarketplace
         {
             updatedUser = null;
             error = "";
-            if (string.IsNullOrWhiteSpace(newPassword) || newPassword.Length < 6)
+            if (string.IsNullOrWhiteSpace(newPassword) || newPassword.Length < 8)
             {
-                error = "Yeni şifre en az 6 karakter olmalıdır.";
+                error = "Güvenlik nedeniyle yeni şifre en az 8 karakter olmalıdır.";
                 return false;
             }
             if (newPassword.Length > 128)
@@ -255,9 +273,9 @@ namespace SmartMarketplace
                 error = "Kullanıcı adı 3-32 karakter olmalı ve yalnızca harf, rakam, nokta, tire veya alt çizgi içermelidir.";
                 return false;
             }
-            if (string.IsNullOrWhiteSpace(password) || password.Length < 6)
+            if (string.IsNullOrWhiteSpace(password) || password.Length < 8 || password.Length > 128)
             {
-                error = "Şifre en az 6 karakter olmalıdır.";
+                error = "Güvenlik nedeniyle şifre 8 ile 128 karakter arasında olmalıdır.";
                 return false;
             }
 
@@ -335,27 +353,40 @@ namespace SmartMarketplace
         private static bool EnsureDefaultAdmin(UserAuthStore store)
         {
             if (store.Users == null) store.Users = new List<UserAccountRecord>();
+            if (store.Users.Count > 0) return false;
+
             string adminUser = NormalizeUsername(Environment.GetEnvironmentVariable("SMART_ADMIN_USER"));
             if (!IsValidUsername(adminUser)) adminUser = DefaultAdminUsername;
 
-            string adminPass = Environment.GetEnvironmentVariable("SMART_ADMIN_PASSWORD");
-            if (string.IsNullOrWhiteSpace(adminPass)) adminPass = "12345656";
-
-            if (store.Users.Count == 0)
+            string adminPass = (Environment.GetEnvironmentVariable("SMART_ADMIN_PASSWORD") ?? "").Trim();
+            bool generatedBootstrap = false;
+            if (string.IsNullOrWhiteSpace(adminPass))
             {
-                store.Users.Add(new UserAccountRecord
-                {
-                    Username = adminUser,
-                    DisplayName = adminUser == DefaultAdminUsername ? "Nihat Stark" : adminUser,
-                    PasswordHash = Security.HashPassword(adminPass),
-                    Role = "admin",
-                    SessionVersion = 1,
-                    CreatedAt = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"),
-                    LastLoginAt = ""
-                });
-                return true;
+                // Never hardcode a predictable default password in public source code — generate strong CSPRNG password
+                adminPass = Security.GenerateSecureToken(10);
+                generatedBootstrap = true;
             }
-            return false;
+
+            store.Users.Add(new UserAccountRecord
+            {
+                Username = adminUser,
+                DisplayName = adminUser == DefaultAdminUsername ? "Nihat Stark" : adminUser,
+                PasswordHash = Security.HashPassword(adminPass),
+                Role = "admin",
+                SessionVersion = 1,
+                CreatedAt = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"),
+                LastLoginAt = ""
+            });
+            if (generatedBootstrap && !Security.IsCloudMode)
+            {
+                Console.WriteLine("[Smart Güvenlik] İlk kurulum rastgele yönetici şifresi oluşturuldu (" + adminUser + "): " + adminPass);
+                Console.WriteLine("[Smart Güvenlik] Giriş yaptıktan sonra Hesap & Profil bölümünden kendi şifrenizi belirleyebilirsiniz.");
+            }
+            else if (generatedBootstrap && Security.IsCloudMode)
+            {
+                Console.WriteLine("[Smart Güvenlik] UYARI: SMART_ADMIN_PASSWORD tanımlı değil; güvenli rastgele başlangıç şifresi üretildi. Vercel ortam değişkenlerinden SMART_ADMIN_PASSWORD ayarlayın.");
+            }
+            return true;
         }
 
         private static UserAuthStore LoadStoreInternal(bool bypassCache)

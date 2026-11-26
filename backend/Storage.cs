@@ -21,7 +21,9 @@ namespace SmartMarketplace
         private static readonly JsonSerializerSettings _jsonSettings = new JsonSerializerSettings
         {
             NullValueHandling = NullValueHandling.Include,
-            ReferenceLoopHandling = ReferenceLoopHandling.Ignore
+            ReferenceLoopHandling = ReferenceLoopHandling.Ignore,
+            TypeNameHandling = TypeNameHandling.None,
+            MaxDepth = 64
         };
 #else
         private static readonly JavaScriptSerializer _json = new JavaScriptSerializer { MaxJsonLength = int.MaxValue, RecursionLimit = 200 };
@@ -300,11 +302,15 @@ namespace SmartMarketplace
                 EnsureDefaults(imported, u);
                 Security.SanitizeImportedDatabase(imported);
 
-                // Preserve existing secrets if backup had stripped/masked secrets
+                // Preserve existing secrets & webhook token if backup had stripped/masked values
                 if (string.IsNullOrWhiteSpace(imported.AiConfig.GeminiApiKey) || Security.IsMaskedPlaceholder(imported.AiConfig.GeminiApiKey))
                     imported.AiConfig.GeminiApiKey = current.AiConfig.GeminiApiKey;
                 if (string.IsNullOrWhiteSpace(imported.AiConfig.OpenAiApiKey) || Security.IsMaskedPlaceholder(imported.AiConfig.OpenAiApiKey))
                     imported.AiConfig.OpenAiApiKey = current.AiConfig.OpenAiApiKey;
+                if (imported.SyncConfig != null && current.SyncConfig != null && string.IsNullOrWhiteSpace(imported.SyncConfig.WebhookToken))
+                    imported.SyncConfig.WebhookToken = current.SyncConfig.WebhookToken;
+                if (imported.RemoteConfig != null && current.RemoteConfig != null && string.IsNullOrWhiteSpace(imported.RemoteConfig.AccessPin))
+                    imported.RemoteConfig.AccessPin = current.RemoteConfig.AccessPin;
 
                 foreach (var impMp in imported.Marketplaces)
                 {
@@ -447,7 +453,7 @@ namespace SmartMarketplace
         public static bool EnsureUploadFileLocal(string fileName, out string fullPath)
         {
             fullPath = null;
-            if (string.IsNullOrWhiteSpace(fileName) || fileName.Contains("/") || fileName.Contains("\\"))
+            if (!Security.IsValidUploadFileName(fileName))
                 return false;
             if (!Security.TryResolveSafePath(UploadsDir, fileName, out fullPath))
                 return false;

@@ -17,6 +17,8 @@ namespace SmartMarketplace
         public Dictionary<string, string> Headers { get; set; }
         public string Body { get; set; }
         public bool PayloadTooLarge { get; set; }
+        public bool BadRequest { get; set; }
+        public bool MethodNotAllowed { get; set; }
 
         public SimpleHttpRequest()
         {
@@ -30,6 +32,11 @@ namespace SmartMarketplace
         private const int MaxDefaultBodyBytes = 2 * 1024 * 1024;  // 2 MB
         private const int MaxUploadBodyBytes = 8 * 1024 * 1024;   // 8 MB (base64 of <= 5 MB image)
         private const int MaxBackupBodyBytes = 10 * 1024 * 1024;  // 10 MB
+        private static readonly SemaphoreSlim _connectionSlots = new SemaphoreSlim(128, 128);
+        private static readonly HashSet<string> _allowedMethods = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            "GET", "HEAD", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"
+        };
 
         private static string _rootDir;
         private static string _frontendDir;
@@ -41,7 +48,7 @@ namespace SmartMarketplace
         private static bool _isSupervised = false;
         private static TcpListener _listener;
         private static readonly string _serverInstanceId = Security.IsCloudMode
-            ? ("cloud-" + (Environment.GetEnvironmentVariable("VERCEL_DEPLOYMENT_ID") ?? "v3.8"))
+            ? ("cloud-" + (Environment.GetEnvironmentVariable("VERCEL_DEPLOYMENT_ID") ?? "v3.9"))
             : Security.GenerateSecureToken(8);
 
         static void Main(string[] args)
@@ -156,7 +163,17 @@ namespace SmartMarketplace
                 try
                 {
                     var client = _listener.AcceptTcpClient();
-                    ThreadPool.QueueUserWorkItem(_ => HandleClient(client));
+                    if (!_connectionSlots.Wait(0))
+                    {
+                        // Anti-DoS concurrency cap reached: drop excess socket cleanly
+                        try { client.Close(); } catch { }
+                        continue;
+                    }
+                    ThreadPool.QueueUserWorkItem(_ =>
+                    {
+                        try { HandleClient(client); }
+                        finally { _connectionSlots.Release(); }
+                    });
                 }
                 catch
                 {
@@ -256,12 +273,25 @@ namespace SmartMarketplace
                         return;
                     }
 
-                    client.ReceiveTimeout = 30000;
+                    // Anti-Slowloris: tight 10s timeout for headers, extended to 30s after headers parsed
+                    client.ReceiveTimeout = 10000;
                     client.SendTimeout = 30000;
                     using (var stream = client.GetStream())
                     {
-                        var req = ParseHttpRequest(stream);
+                        var req = ParseHttpRequest(stream, client);
                         if (req == null) return;
+
+                        if (req.MethodNotAllowed)
+                        {
+                            WriteJson(stream, 405, new { ok = false, error = "İzin verilmeyen HTTP metodu." });
+                            return;
+                        }
+
+                        if (req.BadRequest)
+                        {
+                            WriteJson(stream, 400, new { ok = false, error = "Geçersiz veya güvensiz HTTP isteği reddedildi." });
+                            return;
+                        }
 
                         if (req.PayloadTooLarge)
                         {
@@ -298,8 +328,10 @@ namespace SmartMarketplace
                         int qIdx = rawPath.IndexOf('?');
                         if (qIdx >= 0) rawPath = rawPath.Substring(0, qIdx);
 
-                        // Block explicit traversal sequences immediately before normalization
-                        if (rawPath.Contains("..") || rawPath.Contains("\\") || rawPath.Contains("\0"))
+                        // Block explicit or double-encoded path traversal sequences immediately
+                        string lowRaw = rawPath.ToLowerInvariant();
+                        if (rawPath.Contains("..") || rawPath.Contains("\\") || rawPath.Contains("\0")
+                            || lowRaw.Contains("%2e") || lowRaw.Contains("%2f") || lowRaw.Contains("%5c") || lowRaw.Contains("%00"))
                         {
                             WriteJson(stream, 403, new { ok = false, error = "Geçersiz yol isteği engellendi." });
                             return;
@@ -310,13 +342,8 @@ namespace SmartMarketplace
 
                         if (path == "/api/health" && (req.Method == "GET" || req.Method == "HEAD"))
                         {
-                            WriteJson(stream, 200, new
-                            {
-                                ok = true,
-                                mode = Security.IsCloudMode ? "cloud" : "local",
-                                storage = CloudBlobStorage.IsConfigured ? "vercel-blob" : "local-disk",
-                                appVersion = "v3.8"
-                            });
+                            // Minimal health response without internal storage/version fingerprinting
+                            WriteJson(stream, 200, new { ok = true });
                             return;
                         }
 
@@ -370,6 +397,12 @@ namespace SmartMarketplace
 
                         if (path == "/api/auth/logout" && req.Method == "POST")
                         {
+                            var logoutUser = UserAuthService.ValidateSessionCookie(req.Headers);
+                            if (logoutUser != null && !Security.IsValidUserSessionToken(req.Headers, logoutUser))
+                            {
+                                WriteJson(stream, 403, new { ok = false, error = "Yetkisiz çıkış isteği." });
+                                return;
+                            }
                             string clearCookie = UserAuthService.BuildClearSessionCookie(isHttps);
                             string json = Storage.Serialize(new { ok = true });
                             WriteResponse(stream, 200, "application/json; charset=utf-8", Encoding.UTF8.GetBytes(json), clearCookie);
@@ -433,29 +466,35 @@ namespace SmartMarketplace
         {
             if (path == "/api/auth/logout-all" && req.Method == "POST")
             {
-                if (!Security.IsValidSessionToken(req.Headers))
+                if (!Security.IsValidUserSessionToken(req.Headers, authUser))
                 {
                     WriteJson(stream, 403, new { ok = false, error = "Yetkisiz istek." });
                     return;
                 }
+                if (!Security.CheckRateLimit("logout_all:" + authUser.Username, 10))
+                {
+                    WriteJson(stream, 429, new { ok = false, error = "Çok sık oturum sıfırlama isteği. Lütfen biraz bekleyin." });
+                    return;
+                }
                 var rotated = UserAuthService.RotateSessions(authUser.Username);
                 string freshCookie = rotated != null ? UserAuthService.BuildSessionCookie(rotated, true, isHttps) : null;
+                string freshCsrf = rotated != null ? Security.GetUserCsrfToken(rotated.Username, rotated.SessionVersion) : "";
                 var dbLog = Storage.Load();
                 Storage.AddLog(dbLog, "system", "info", "Hesap Güvenliği", "Diğer tüm cihazlardaki oturumlar sonlandırıldı.");
                 Storage.Save(dbLog);
-                string json = Storage.Serialize(new { ok = true });
+                string json = Storage.Serialize(new { ok = true, csrfToken = freshCsrf });
                 WriteResponse(stream, 200, "application/json; charset=utf-8", Encoding.UTF8.GetBytes(json), freshCookie);
                 return;
             }
 
             if (path == "/api/account/avatar" && req.Method == "POST")
             {
-                if (!Security.IsValidSessionToken(req.Headers))
+                if (!Security.IsValidUserSessionToken(req.Headers, authUser))
                 {
                     WriteJson(stream, 403, new { ok = false, error = "Yetkisiz istek." });
                     return;
                 }
-                if (!Security.CheckRateLimit("avatar_upload", 20))
+                if (!Security.CheckRateLimit("avatar_upload:" + authUser.Username, 20))
                 {
                     WriteJson(stream, 429, new { ok = false, error = "Çok sık fotoğraf yükleme isteği. Lütfen biraz bekleyin." });
                     return;
@@ -483,7 +522,7 @@ namespace SmartMarketplace
 
             if (path == "/api/account/avatar/remove" && req.Method == "POST")
             {
-                if (!Security.IsValidSessionToken(req.Headers))
+                if (!Security.IsValidUserSessionToken(req.Headers, authUser))
                 {
                     WriteJson(stream, 403, new { ok = false, error = "Yetkisiz istek." });
                     return;
@@ -500,7 +539,7 @@ namespace SmartMarketplace
 
             if (path == "/api/account/profile" && req.Method == "POST")
             {
-                if (!Security.IsValidSessionToken(req.Headers))
+                if (!Security.IsValidUserSessionToken(req.Headers, authUser))
                 {
                     WriteJson(stream, 403, new { ok = false, error = "Yetkisiz istek." });
                     return;
@@ -555,9 +594,14 @@ namespace SmartMarketplace
 
             if (path == "/api/account/password" && req.Method == "POST")
             {
-                if (!Security.IsValidSessionToken(req.Headers))
+                if (!Security.IsValidUserSessionToken(req.Headers, authUser))
                 {
                     WriteJson(stream, 403, new { ok = false, error = "Yetkisiz istek." });
+                    return;
+                }
+                if (!Security.CheckRateLimit("pwd_change:" + authUser.Username, 6, 300))
+                {
+                    WriteJson(stream, 429, new { ok = false, error = "Çok sık şifre değiştirme denemesi. Lütfen birkaç dakika bekleyin." });
                     return;
                 }
                 var body = Storage.Deserialize<Dictionary<string, object>>(req.Body);
@@ -574,14 +618,15 @@ namespace SmartMarketplace
                 Storage.AddLog(dbPwd, "system", "success", "Hesap Güvenliği", "Hesap şifresi güncellendi; diğer cihazlardaki oturumlar kapatıldı.");
                 Storage.Save(dbPwd);
                 string freshCookie = UserAuthService.BuildSessionCookie(updated, true, isHttps);
-                string json = Storage.Serialize(new { ok = true });
+                string freshCsrf = Security.GetUserCsrfToken(updated.Username, updated.SessionVersion);
+                string json = Storage.Serialize(new { ok = true, csrfToken = freshCsrf });
                 WriteResponse(stream, 200, "application/json; charset=utf-8", Encoding.UTF8.GetBytes(json), freshCookie);
                 return;
             }
 
             if (path == "/api/account/users/create" && req.Method == "POST")
             {
-                if (!Security.IsValidSessionToken(req.Headers))
+                if (!Security.IsValidUserSessionToken(req.Headers, authUser))
                 {
                     WriteJson(stream, 403, new { ok = false, error = "Yetkisiz istek." });
                     return;
@@ -589,6 +634,11 @@ namespace SmartMarketplace
                 if (!string.Equals(authUser.Role, "admin", StringComparison.OrdinalIgnoreCase))
                 {
                     WriteJson(stream, 403, new { ok = false, error = "Yeni kullanıcı ekleme yetkisi yalnızca yöneticidedir." });
+                    return;
+                }
+                if (!Security.CheckRateLimit("user_create:" + authUser.Username, 10))
+                {
+                    WriteJson(stream, 429, new { ok = false, error = "Çok sık kullanıcı oluşturma isteği." });
                     return;
                 }
                 var body = Storage.Deserialize<Dictionary<string, object>>(req.Body);
@@ -612,7 +662,7 @@ namespace SmartMarketplace
 
             if (path == "/api/account/users/delete" && req.Method == "POST")
             {
-                if (!Security.IsValidSessionToken(req.Headers))
+                if (!Security.IsValidUserSessionToken(req.Headers, authUser))
                 {
                     WriteJson(stream, 403, new { ok = false, error = "Yetkisiz istek." });
                     return;
@@ -620,6 +670,11 @@ namespace SmartMarketplace
                 if (!string.Equals(authUser.Role, "admin", StringComparison.OrdinalIgnoreCase))
                 {
                     WriteJson(stream, 403, new { ok = false, error = "Kullanıcı silme yetkisi yalnızca yöneticidedir." });
+                    return;
+                }
+                if (!Security.CheckRateLimit("user_delete:" + authUser.Username, 10))
+                {
+                    WriteJson(stream, 429, new { ok = false, error = "Çok sık kullanıcı silme isteği." });
                     return;
                 }
                 var body = Storage.Deserialize<Dictionary<string, object>>(req.Body);
@@ -643,7 +698,7 @@ namespace SmartMarketplace
                             WriteJson(stream, 200, new
                             {
                                 ok = true,
-                                appVersion = "v3.8",
+                                appVersion = "v3.9",
                                 serverId = _serverInstanceId,
                                 frontendVersion = ComputeFrontendVersion(),
                                 dataVersion = Storage.GetDataVersion(),
@@ -654,7 +709,7 @@ namespace SmartMarketplace
 
                         if (path == "/api/network-info" && req.Method == "GET")
                         {
-                            if (!Security.IsValidSessionToken(req.Headers))
+                            if (!Security.IsValidUserSessionToken(req.Headers, authUser))
                             {
                                 WriteJson(stream, 403, new { ok = false, error = "Yetkisiz istek." });
                                 return;
@@ -698,7 +753,7 @@ namespace SmartMarketplace
 
                         if (path == "/api/remote/start" && req.Method == "POST")
                         {
-                            if (!Security.IsValidSessionToken(req.Headers))
+                            if (!Security.IsValidUserSessionToken(req.Headers, authUser))
                             {
                                 WriteJson(stream, 403, new { ok = false, error = "Yetkisiz istek." });
                                 return;
@@ -739,7 +794,7 @@ namespace SmartMarketplace
 
                         if (path == "/api/remote/stop" && req.Method == "POST")
                         {
-                            if (!Security.IsValidSessionToken(req.Headers))
+                            if (!Security.IsValidUserSessionToken(req.Headers, authUser))
                             {
                                 WriteJson(stream, 403, new { ok = false, error = "Yetkisiz istek." });
                                 return;
@@ -760,7 +815,7 @@ namespace SmartMarketplace
 
                         if (path == "/api/remote/regenerate-pin" && req.Method == "POST")
                         {
-                            if (!Security.IsValidSessionToken(req.Headers))
+                            if (!Security.IsValidUserSessionToken(req.Headers, authUser))
                             {
                                 WriteJson(stream, 403, new { ok = false, error = "Yetkisiz istek." });
                                 return;
@@ -776,8 +831,8 @@ namespace SmartMarketplace
 
                         if (path.StartsWith("/api/"))
                         {
-                            // 3. Per-session 256-bit CSRF / API Token Guard on ALL API routes
-                            if (!Security.IsValidSessionToken(req.Headers))
+                            // 3. Per-user 256-bit HMAC CSRF / API Token Guard on ALL API routes
+                            if (!Security.IsValidUserSessionToken(req.Headers, authUser))
                             {
                                 WriteJson(stream, 403, new { ok = false, error = "Yetkisiz API isteği: geçerli oturum anahtarı eksik." });
                                 return;
@@ -788,7 +843,7 @@ namespace SmartMarketplace
                         {
                             string fileName = path.Substring("/uploads/".Length);
                             string fullUploadPath;
-                            if (!Storage.EnsureUploadFileLocal(fileName, out fullUploadPath))
+                            if (!Security.IsValidUploadFileName(fileName) || !Storage.EnsureUploadFileLocal(fileName, out fullUploadPath))
                             {
                                 WriteResponse(stream, 404, "text/plain; charset=utf-8", Encoding.UTF8.GetBytes("Bulunamadı"));
                                 return;
@@ -811,7 +866,7 @@ namespace SmartMarketplace
                             }
                             if (Path.GetFileName(fullFrontendPath).Equals("index.html", StringComparison.OrdinalIgnoreCase))
                             {
-                                ServeIndexWithSessionToken(fullFrontendPath, stream);
+                                ServeIndexWithSessionToken(fullFrontendPath, authUser, stream);
                             }
                             else
                             {
@@ -820,7 +875,7 @@ namespace SmartMarketplace
                         }
         }
 
-        private static SimpleHttpRequest ParseHttpRequest(NetworkStream stream)
+        private static SimpleHttpRequest ParseHttpRequest(NetworkStream stream, TcpClient client)
         {
             var headerBytes = new MemoryStream();
             var buf = new byte[4096];
@@ -836,6 +891,9 @@ namespace SmartMarketplace
                 if (arr.Length > 32768 && headerEnd < 0) return null; // 32 KB max header
             }
 
+            // Headers received cleanly — extend timeout to 30s for body uploads
+            try { if (client != null) client.ReceiveTimeout = 30000; } catch { }
+
             byte[] allInitial = headerBytes.ToArray();
             string headerText = Encoding.ASCII.GetString(allInitial, 0, headerEnd);
             var lines = headerText.Split(new[] { "\r\n" }, StringSplitOptions.None);
@@ -844,16 +902,33 @@ namespace SmartMarketplace
             var parts = lines[0].Split(' ');
             if (parts.Length < 2) return null;
 
+            string methodUpper = parts[0].ToUpperInvariant();
+            if (!_allowedMethods.Contains(methodUpper))
+            {
+                return new SimpleHttpRequest { Method = methodUpper, MethodNotAllowed = true };
+            }
+
+            string rawReqTarget = parts[1] ?? "";
+            if (rawReqTarget.Length > 4096)
+                return new SimpleHttpRequest { Method = methodUpper, BadRequest = true };
+
+            // Reject encoded traversal / null bytes BEFORE decoding as well
+            string lowRawTarget = rawReqTarget.ToLowerInvariant();
+            if (lowRawTarget.Contains("%2e%2e") || lowRawTarget.Contains("%252e") || lowRawTarget.Contains("%5c") || lowRawTarget.Contains("%00"))
+                return new SimpleHttpRequest { Method = methodUpper, BadRequest = true };
+
             string decodedPath;
-            try { decodedPath = Uri.UnescapeDataString(parts[1]); }
-            catch { return null; }
+            try { decodedPath = Uri.UnescapeDataString(rawReqTarget); }
+            catch { return new SimpleHttpRequest { Method = methodUpper, BadRequest = true }; }
 
             var req = new SimpleHttpRequest
             {
-                Method = parts[0].ToUpperInvariant(),
+                Method = methodUpper,
                 Path = decodedPath
             };
 
+            bool hasTransferEncoding = false;
+            bool hasContentLength = false;
             for (int i = 1; i < lines.Length; i++)
             {
                 int colon = lines[i].IndexOf(':');
@@ -861,11 +936,32 @@ namespace SmartMarketplace
                 {
                     string k = lines[i].Substring(0, colon).Trim();
                     string v = lines[i].Substring(colon + 1).Trim();
+                    if (k.Equals("Host", StringComparison.OrdinalIgnoreCase) && req.Headers.ContainsKey("Host"))
+                    {
+                        req.BadRequest = true; // Duplicate Host header (anti-smuggling)
+                        return req;
+                    }
+                    if (k.Equals("Content-Length", StringComparison.OrdinalIgnoreCase))
+                    {
+                        if (hasContentLength) { req.BadRequest = true; return req; } // Duplicate Content-Length (anti-smuggling)
+                        hasContentLength = true;
+                    }
+                    if (k.Equals("Transfer-Encoding", StringComparison.OrdinalIgnoreCase))
+                    {
+                        hasTransferEncoding = true;
+                    }
                     if (req.Headers.ContainsKey(k) && k.Equals("Cookie", StringComparison.OrdinalIgnoreCase))
                         req.Headers[k] = req.Headers[k] + "; " + v;
                     else
                         req.Headers[k] = v;
                 }
+            }
+
+            // RFC 7230 §3.3.3 Anti-Request-Smuggling: reject messages with BOTH Transfer-Encoding and Content-Length
+            if (hasTransferEncoding && hasContentLength)
+            {
+                req.BadRequest = true;
+                return req;
             }
 
             // Honor Expect: 100-continue so Cloudflare / Go reverse proxy never stalls on mobile uploads
@@ -1099,6 +1195,11 @@ namespace SmartMarketplace
 
                 if (path == "/api/backup/export" && method == "GET")
                 {
+                    if (!Security.CheckRateLimit("backup_export:" + Storage.CurrentUser, 10))
+                    {
+                        WriteJson(stream, 429, new { ok = false, error = "Çok sık yedek dışa aktarma isteği. Lütfen biraz bekleyin." });
+                        return;
+                    }
                     string raw = Storage.ExportSafeBackupJson();
                     byte[] bytes = Encoding.UTF8.GetBytes(raw);
                     WriteResponse(stream, 200, "application/json; charset=utf-8", bytes);
@@ -1703,6 +1804,11 @@ namespace SmartMarketplace
 
                 if (path == "/api/stock/sync-all" && method == "POST")
                 {
+                    if (!Security.CheckRateLimit("sync_all:" + Storage.CurrentUser, 15))
+                    {
+                        WriteJson(stream, 429, new { ok = false, error = "Çok sık senkronizasyon isteği. Lütfen birkaç saniye bekleyin." });
+                        return;
+                    }
                     var db = Storage.Load();
                     int count = RunFullStockSync(db, "Manuel Toplu Senkronizasyon");
                     WriteJson(stream, 200, new { ok = true, syncedOperations = count, lastSyncAt = db.SyncConfig.LastSyncAt, lastOrderPullAt = db.SyncConfig.LastOrderPullAt });
@@ -1941,13 +2047,30 @@ namespace SmartMarketplace
         {
             if (req != null && req.Headers != null)
             {
-                if (req.Headers.ContainsKey("X-Forwarded-For") && !string.IsNullOrWhiteSpace(req.Headers["X-Forwarded-For"]))
+                if (Security.IsCloudMode)
                 {
-                    string xff = req.Headers["X-Forwarded-For"].Split(',')[0].Trim();
-                    if (!string.IsNullOrEmpty(xff)) return xff;
+                    // On Vercel, trust ONLY Vercel's edge-injected client IP headers (never spoofable leftmost X-Forwarded-For!)
+                    if (req.Headers.ContainsKey("x-vercel-forwarded-for") && !string.IsNullOrWhiteSpace(req.Headers["x-vercel-forwarded-for"]))
+                    {
+                        string vff = req.Headers["x-vercel-forwarded-for"].Split(',')[0].Trim();
+                        if (!string.IsNullOrEmpty(vff)) return vff;
+                    }
+                    if (req.Headers.ContainsKey("x-real-ip") && !string.IsNullOrWhiteSpace(req.Headers["x-real-ip"]))
+                    {
+                        string xri = req.Headers["x-real-ip"].Trim();
+                        if (!string.IsNullOrEmpty(xri)) return xri;
+                    }
+                    if (req.Headers.ContainsKey("X-Forwarded-For") && !string.IsNullOrWhiteSpace(req.Headers["X-Forwarded-For"]))
+                    {
+                        var hops = req.Headers["X-Forwarded-For"].Split(',');
+                        string rightmost = hops[hops.Length - 1].Trim();
+                        if (!string.IsNullOrEmpty(rightmost)) return rightmost;
+                    }
                 }
-                if (req.Headers.ContainsKey("CF-Connecting-IP") && !string.IsNullOrWhiteSpace(req.Headers["CF-Connecting-IP"]))
+                else if (Security.IsTunnelRequest(req.Headers) && req.Headers.ContainsKey("CF-Connecting-IP") && !string.IsNullOrWhiteSpace(req.Headers["CF-Connecting-IP"]))
+                {
                     return req.Headers["CF-Connecting-IP"].Trim();
+                }
             }
             return remoteEp != null && remoteEp.Address != null ? remoteEp.Address.ToString() : "unknown";
         }
@@ -2045,10 +2168,11 @@ namespace SmartMarketplace
             }
         }
 
-        private static void ServeIndexWithSessionToken(string indexPath, NetworkStream stream)
+        private static void ServeIndexWithSessionToken(string indexPath, UserAccountRecord authUser, NetworkStream stream)
         {
             string html = File.ReadAllText(indexPath, Encoding.UTF8);
-            string metaTag = "<meta name=\"smart-token\" content=\"" + Security.SessionToken + "\" />";
+            string token = authUser != null ? Security.GetUserCsrfToken(authUser.Username, authUser.SessionVersion) : Security.SessionToken;
+            string metaTag = "<meta name=\"smart-token\" content=\"" + token + "\" />";
             if (html.Contains("<!--SMART_SESSION_TOKEN-->"))
                 html = html.Replace("<!--SMART_SESSION_TOKEN-->", metaTag);
             else
@@ -2259,13 +2383,16 @@ namespace SmartMarketplace
                 case 401: statusText = "Unauthorized"; break;
                 case 403: statusText = "Forbidden"; break;
                 case 404: statusText = "Not Found"; break;
+                case 405: statusText = "Method Not Allowed"; break;
                 case 413: statusText = "Payload Too Large"; break;
                 case 429: statusText = "Too Many Requests"; break;
                 default: statusText = "Internal Server Error"; break;
             }
 
-            // Hardened security headers — NO wildcard CORS, strict CSP without unsafe-inline scripts
-            string csp = "default-src 'self'; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'";
+            // Hardened security headers — NO wildcard CORS, strict CSP without unsafe-inline scripts, COOP/CORP, HSTS in cloud
+            string csp = "default-src 'self'; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'"
+                + (Security.IsCloudMode ? "; upgrade-insecure-requests" : "");
+            string hstsLine = Security.IsCloudMode ? "Strict-Transport-Security: max-age=63072000; includeSubDomains\r\n" : "";
             string cookieLine = string.IsNullOrEmpty(setCookieHeader) ? "" : ("Set-Cookie: " + setCookieHeader + "\r\n");
             string locLine = string.IsNullOrEmpty(locationHeader) ? "" : ("Location: " + locationHeader + "\r\n");
             string header = "HTTP/1.1 " + statusCode + " " + statusText + "\r\n"
@@ -2273,10 +2400,15 @@ namespace SmartMarketplace
                 + "Content-Length: " + body.Length + "\r\n"
                 + cookieLine
                 + locLine
+                + hstsLine
                 + "X-Content-Type-Options: nosniff\r\n"
                 + "X-Frame-Options: DENY\r\n"
+                + "X-Download-Options: noopen\r\n"
+                + "X-Permitted-Cross-Domain-Policies: none\r\n"
+                + "Cross-Origin-Opener-Policy: same-origin\r\n"
+                + "Cross-Origin-Resource-Policy: same-origin\r\n"
                 + "Referrer-Policy: no-referrer\r\n"
-                + "Permissions-Policy: camera=(), microphone=(), geolocation=()\r\n"
+                + "Permissions-Policy: camera=(), microphone=(), geolocation=(), payment=(), usb=()\r\n"
                 + "Content-Security-Policy: " + csp + "\r\n"
                 + "Cache-Control: no-store, no-cache, must-revalidate, max-age=0\r\n"
                 + "Pragma: no-cache\r\n"

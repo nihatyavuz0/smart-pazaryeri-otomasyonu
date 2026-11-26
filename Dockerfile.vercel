@@ -15,6 +15,7 @@ WORKDIR /app
 RUN apk add --no-cache icu-libs icu-data-full tzdata
 
 ENV DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=false
+ENV DOTNET_EnableDiagnostics=0
 ENV TZ=Europe/Istanbul
 ENV PORT=80
 ENV SMART_CLOUD_MODE=1

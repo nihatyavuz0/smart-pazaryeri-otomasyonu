@@ -381,6 +381,8 @@ namespace SmartMarketplace
                 if (!low.EndsWith(".jpg") && !low.EndsWith(".jpeg") && !low.EndsWith(".png") && !low.EndsWith(".webp"))
                     return false;
             }
+            // DNS-resolved SSRF protection: block localhost, RFC1918 private LANs, 169.254.169.254 cloud metadata, etc.
+            if (!Security.IsSafePublicExternalUrl(url)) return false;
 
             try
             {

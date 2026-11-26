@@ -230,6 +230,9 @@ namespace SmartMarketplace
         /// <summary>
         /// Parses incoming JSON webhook payloads from Trendyol, Hepsiburada, N11, İdefix, Pazarama, or custom integrations.
         /// </summary>
+        private const int MaxWebhookOrderLines = 200;
+        private const int MaxWebhookNestingDepth = 16;
+
         public static List<IncomingOrderLine> ParseWebhookPayload(string marketplaceId, string rawBody)
         {
             var list = new List<IncomingOrderLine>();
@@ -243,7 +246,7 @@ namespace SmartMarketplace
             var rootDict = parsed as Dictionary<string, object>;
             if (rootDict != null)
             {
-                ExtractOrderLinesFromObject(mpId, rootDict, list);
+                ExtractOrderLinesFromObject(mpId, rootDict, list, 0);
             }
             else
             {
@@ -252,17 +255,18 @@ namespace SmartMarketplace
                 {
                     foreach (var item in arr)
                     {
+                        if (list.Count >= MaxWebhookOrderLines) break;
                         var d = item as Dictionary<string, object>;
-                        if (d != null) ExtractOrderLinesFromObject(mpId, d, list);
+                        if (d != null) ExtractOrderLinesFromObject(mpId, d, list, 1);
                     }
                 }
             }
             return list;
         }
 
-        private static void ExtractOrderLinesFromObject(string mpId, Dictionary<string, object> obj, List<IncomingOrderLine> target)
+        private static void ExtractOrderLinesFromObject(string mpId, Dictionary<string, object> obj, List<IncomingOrderLine> target, int depth)
         {
-            if (obj == null) return;
+            if (obj == null || depth > MaxWebhookNestingDepth || target.Count >= MaxWebhookOrderLines) return;
 
             // Wrapped array (content / orders / data / items / packages)
             string[] wrapKeys = { "content", "orders", "packages" };
@@ -275,8 +279,9 @@ namespace SmartMarketplace
                     {
                         foreach (var w in wrapped)
                         {
+                            if (target.Count >= MaxWebhookOrderLines) break;
                             var wd = w as Dictionary<string, object>;
-                            if (wd != null) ExtractOrderLinesFromObject(mpId, wd, target);
+                            if (wd != null) ExtractOrderLinesFromObject(mpId, wd, target, depth + 1);
                         }
                         return;
                     }
@@ -292,13 +297,14 @@ namespace SmartMarketplace
             {
                 foreach (var li in lineItems)
                 {
+                    if (target.Count >= MaxWebhookOrderLines) break;
                     var ld = li as Dictionary<string, object>;
                     if (ld == null) continue;
                     var prodSub = ld.ContainsKey("product") ? (ld["product"] as Dictionary<string, object>) : null;
                     string bc = GetAnyStr(ld, "barcode", "Barcode", "code") ?? GetAnyStr(prodSub, "barcode", "code");
                     string sk = GetAnyStr(ld, "merchantSku", "merchantSKU", "stockCode", "vendorStockCode", "sku", "SellerSKU")
                         ?? GetAnyStr(prodSub, "stockCode", "code");
-                    int qty = GetAnyInt(ld, 1, "quantity", "Quantity", "QuantityOrdered", "amount", "count");
+                    int qty = Math.Max(1, Math.Min(10000, GetAnyInt(ld, 1, "quantity", "Quantity", "QuantityOrdered", "amount", "count")));
                     string lineStatus = GetAnyStr(ld, "orderLineItemStatusName", "status", "itemStatus") ?? status;
                     string pname = GetAnyStr(ld, "productName", "title", "name") ?? GetAnyStr(prodSub, "name", "title");
 
@@ -311,7 +317,7 @@ namespace SmartMarketplace
                             Barcode = bc ?? "",
                             Sku = sk ?? "",
                             ProductName = pname ?? "",
-                            Quantity = Math.Max(1, qty),
+                            Quantity = qty,
                             Status = lineStatus ?? "Created"
                         });
                     }
@@ -331,7 +337,7 @@ namespace SmartMarketplace
                     Barcode = flatBc ?? "",
                     Sku = flatSku ?? "",
                     ProductName = GetAnyStr(obj, "productName", "title", "name") ?? "",
-                    Quantity = Math.Max(1, GetAnyInt(obj, 1, "quantity", "qty", "amount", "count")),
+                    Quantity = Math.Max(1, Math.Min(10000, GetAnyInt(obj, 1, "quantity", "qty", "amount", "count"))),
                     Status = status ?? "Created"
                 });
             }
@@ -435,7 +441,7 @@ namespace SmartMarketplace
                     foreach (var item in dataArr)
                     {
                         var d = item as Dictionary<string, object>;
-                        if (d != null) ExtractOrderLinesFromObject("pazarama", d, list);
+                        if (d != null) ExtractOrderLinesFromObject("pazarama", d, list, 1);
                     }
                 }
             }
